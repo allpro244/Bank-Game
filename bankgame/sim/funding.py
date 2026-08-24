@@ -13,6 +13,10 @@ Capital: common raises, preferred issuance, dividends, buybacks.
 from . import ledger as L
 from .economy import yield_at
 
+# Overnight "Draw FHLB" is a short advance, not a 30-day roll that
+# comes due on the same morning as next month's originations.
+OVERNIGHT_FHLB_MONTHS = 3
+
 
 def new_funding():
     return {
@@ -182,6 +186,7 @@ def pay_accrued_monthly(state):
     bank = state["bank"]
     ap = -bank["ledger"]["balances"]["2300"]
     if ap > 0:
+        ensure_cash(state, ap)
         L.post(bank["ledger"], state["time"]["date"], "Accrued interest paid",
                [["2300", ap, 0], ["1000", 0, ap]], tag="int")
 
@@ -197,6 +202,7 @@ def step_month(state, rng):
         for item in f[kind]:
             item["months_left"] -= 1
             if item["months_left"] <= 0:
+                ensure_cash(state, item["amount"])
                 L.post(bank["ledger"], date,
                        "%s matured ($%s)" % (kind.upper(), f"{item['amount'] // 100:,}"),
                        [[acct, item["amount"], 0], ["1000", 0, item["amount"]]], tag="fund")
@@ -232,25 +238,23 @@ def manage_overnight(state):
 
     cash = ledger["balances"]["1000"]
     target_cash = _target_cash(state)
+    # Own money first: vault, then fed-funds-sold, then Fed balances.
+    # Do not ask the player to borrow while $800k is still sitting at the Fed.
     if cash < 0:
-        need = -cash + target_cash // 2
-        # 1) draw down fed funds sold (your own money — always automatic)
-        ffs = ledger["balances"]["1100"]
-        if ffs > 0:
-            take = min(ffs, need)
-            L.post(ledger, date, "Fed funds sold redeemed",
-                   [["1000", take, 0], ["1100", 0, take]], tag="fund")
-            need -= take
+        ensure_cash(state, 0)
+        cash = ledger["balances"]["1000"]
+    if cash < 0:
+        need = -cash
         used_window = 0
         used_fhlb = 0
-        # 2) FHLB / fed-funds purchased: auto covers; ask leaves the hole
-        #    for the player (window is never silent).
+        # FHLB / fed-funds purchased: auto covers; ask leaves the hole
+        # for the player (window is never silent).
         if policy == "auto" and need >= 100_000_00:
             cap = fhlb_capacity(state)
             take = min(need, cap)
             take = (take // 10_000_00) * 10_000_00
             if take >= 100_000_00:
-                res = take_fhlb(state, take, 1)
+                res = take_fhlb(state, take, OVERNIGHT_FHLB_MONTHS)
                 if not isinstance(res, str):
                     used_fhlb = take
                     need -= take
@@ -271,10 +275,11 @@ def manage_overnight(state):
                     "blocking": True,
                     "need": need,
                     "title": "Overnight cash shortfall",
-                    "text": ("We are short $%s overnight after using our own cash "
-                             "and fed-funds-sold. The clock stops so you can choose: "
-                             "draw FHLB, borrow fed funds, use the discount window, "
-                             "or wait and shrink next month's originations.\n\n"
+                    "text": ("We are short $%s overnight after using vault cash, "
+                             "fed-funds-sold, and balances at the Fed. The clock "
+                             "stops so you can choose: draw a 3-month FHLB advance, "
+                             "borrow fed funds, use the discount window, or wait "
+                             "and shrink next month's originations.\n\n"
                              "The window is not drawn until you pick it. Examiners "
                              "count every use."
                              % f"{need // 100:,}"),
@@ -295,15 +300,15 @@ def manage_overnight(state):
                          "window uses: %d."
                          % (f"{used_window // 100:,}",
                             state["bank"]["funding"]["discount_window_uses"]))})
-    else:
+    cash = ledger["balances"]["1000"]
+    if cash >= 0:
+        if cash < target_cash:
+            ensure_cash(state, target_cash)
+            cash = ledger["balances"]["1000"]
         surplus = cash - target_cash
         if surplus > 500_000_00:
             L.post(ledger, date, "Excess cash swept to fed funds sold",
                    [["1100", surplus, 0], ["1000", 0, surplus]], tag="fund")
-        elif surplus < -1_000_00 and ledger["balances"]["1100"] > 0:
-            take = min(ledger["balances"]["1100"], -surplus)
-            L.post(ledger, date, "Fed funds sold redeemed to target",
-                   [["1000", take, 0], ["1100", 0, take]], tag="fund")
     return events
 
 

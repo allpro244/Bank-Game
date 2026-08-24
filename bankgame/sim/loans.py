@@ -363,6 +363,9 @@ def originate_month(state, rng):
             + bank["ledger"]["balances"]["1100"])
     if cash < max(250_000_00, int(total_before * 0.01)):
         funding_mult *= 0.35
+    if bank["funding"].get("shrink_originations"):
+        funding_mult *= 0.25
+        bank["funding"]["shrink_originations"] = False
 
     for market_id in sorted(bank["deposits"]["pools"].keys()):
         region = state["regions"][market_id]
@@ -422,6 +425,8 @@ def originate_month(state, rng):
                     originated[product] = originated.get(product, 0) + amt
     total_orig = sum(originated.values())
     if total_orig > 0:
+        from .funding import ensure_cash
+        ensure_cash(state, total_orig)
         L.post(bank["ledger"], state["time"]["date"],
                "Loan originations funded (month)",
                [["1300", total_orig, 0], ["1000", 0, total_orig]], tag="loan")

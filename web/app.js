@@ -1617,7 +1617,7 @@ function renderEventModal() {
       <button onclick="eventChoice(${ev.id}, 'retire')">Retire to the title screen</button></div>`;
   } else if (ev.type === 'overnight_shortfall') {
     controls = `<div class="btnrow">
-      <button class="primary" onclick="eventChoice(${ev.id}, 'fhlb')">Draw FHLB</button>
+      <button class="primary" onclick="eventChoice(${ev.id}, 'fhlb')">Draw 3-month FHLB</button>
       <button onclick="eventChoice(${ev.id}, 'fed_funds')">Borrow fed funds</button>
       <button class="danger" onclick="eventChoice(${ev.id}, 'window')">Use the discount window</button>
       <button onclick="eventChoice(${ev.id}, 'wait')">Wait — shrink originations</button></div>`;
