@@ -13,6 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from .store import Store
 from .sim import engine, ledger as L, statements, securities, competitors
 from .sim import deposits as DEP, loans as LN, regulation as REG, funding as FUND
+from .sim import fraud as FR
 from .sim import advisor as ADV
 from .sim.newgame import new_game
 from .sim import goals as GOALS
@@ -35,6 +36,7 @@ class Game:
         s = self.state
         if s is None:
             return {"no_game": True, "saves": self.store.list_saves()}
+        FR.prune_resolved_events(s)
         bank = s["bank"]
         ledger = bank["ledger"]
         econ = s["economy"]
@@ -142,6 +144,7 @@ class Game:
         s = self.state
         if s is None:
             return {"error": "no game loaded"}
+        FR.prune_resolved_events(s)
         bank = s["bank"]
         ledger = bank["ledger"]
         econ = s["economy"]
