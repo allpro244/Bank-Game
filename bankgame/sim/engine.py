@@ -714,6 +714,7 @@ def _integration_month(state, rng):
 
 def inbox_waiting(state):
     """Decisions that should stop a multi-day advance."""
+    fraud.prune_resolved_events(state)
     if any(e.get("blocking") or e.get("choices") for e in state["events"]["pending"]):
         return True
     if state["bank"]["loans"]["queue"]:
@@ -972,7 +973,8 @@ def perform_action(state, action, payload):
         if ev is None:
             raise ActionError("event not found")
         result = _handle_event_choice(state, ev, choice, p)
-        pend.remove(ev)
+        if ev in pend:
+            pend.remove(ev)
         return result
 
     if action == "dismiss_event":
