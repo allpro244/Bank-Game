@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Bank Game</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🏦</text></svg>">
+</head>
+<body>
+<div id="topbar" class="hidden">
+  <span class="bankname" id="tb-name"></span>
+  <span class="date" id="tb-date"></span>
+  <span class="advbtns">
+    <button onclick="advance('day')">+1 Day</button>
+    <button onclick="advance('week')">+1 Wk</button>
+    <button onclick="advance('month')">+1 Mo</button>
+    <button onclick="advance('quarter')">+1 Qtr</button>
+  </span>
+  <span class="stat">Assets <b id="tb-assets"></b></span>
+  <span class="stat">Cash <b id="tb-cash"></b></span>
+  <span class="stat">Equity <b id="tb-equity"></b></span>
+  <span class="stat">NI (MTD) <b id="tb-ni"></b></span>
+  <span class="stat" id="tb-pca"></span>
+  <span style="flex:1"></span>
+  <button class="small" onclick="showSaves()">Saves</button>
+</div>
+
+<div id="layout" class="hidden">
+  <div id="nav"></div>
+  <div id="main"></div>
+</div>
+
+<div id="savescreen" class="hidden"></div>
+<div id="eventmodal" class="hidden"></div>
+<div id="textmodal" class="hidden"></div>
+<div id="toast"></div>
+
+<script src="charts.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

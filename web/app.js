@@ -1,0 +1,1060 @@
+/* Bank Game UI. Vanilla JS, talks to the local JSON API. */
+
+let SUM = null;          // latest /api/summary
+let TAB = 'dashboard';
+let SEC = {};            // section cache
+let BUSY = false;
+
+/* ---------------- helpers ---------------- */
+const $ = id => document.getElementById(id);
+const esc = s => String(s == null ? '' : s)
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+function fm(cents) {           // full dollars with commas
+  if (cents == null) return '—';
+  const d = Math.round(cents / 100);
+  const sign = d < 0 ? '-' : '';
+  return sign + '$' + Math.abs(d).toLocaleString('en-US');
+}
+function fmc(cents) {          // compact
+  if (cents == null) return '—';
+  const d = cents / 100, a = Math.abs(d), s = d < 0 ? '-$' : '$';
+  if (a >= 1e12) return s + (a / 1e12).toFixed(2) + 'T';
+  if (a >= 1e9) return s + (a / 1e9).toFixed(2) + 'B';
+  if (a >= 1e6) return s + (a / 1e6).toFixed(2) + 'M';
+  if (a >= 1e3) return s + (a / 1e3).toFixed(0) + 'K';
+  return s + a.toFixed(0);
+}
+function pct(v, dp) { return v == null ? '—' : (v * 100).toFixed(dp == null ? 2 : dp) + '%'; }
+function cls(v) { return v > 0 ? 'pos' : v < 0 ? 'neg' : ''; }
+function moneyIn(id) {         // dollars input -> cents
+  const v = parseFloat($(id).value);
+  if (isNaN(v)) throw 'enter a number';
+  return Math.round(v * 100);
+}
+function numIn(id) {
+  const v = parseFloat($(id).value);
+  if (isNaN(v)) throw 'enter a number';
+  return v;
+}
+
+async function api(path, body) {
+  const opts = body === undefined ? {} :
+    { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body) };
+  const r = await fetch(path, opts);
+  const j = await r.json();
+  if (j.error) throw j.error;
+  return j;
+}
+
+function toast(msg, isErr) {
+  const t = document.createElement('div');
+  t.className = 'toastmsg' + (isErr ? ' err' : '');
+  t.textContent = msg;
+  $('toast').appendChild(t);
+  setTimeout(() => t.remove(), isErr ? 7000 : 3500);
+}
+
+async function act(action, payload) {
+  if (BUSY) return;
+  try {
+    BUSY = true;
+    const r = await api('/api/action', { action, payload });
+    if (r.result && r.result.message) toast(r.result.message);
+    await refresh();
+  } catch (e) { toast(String(e), true); }
+  finally { BUSY = false; }
+}
+
+async function setPol(path, value) {
+  try {
+    await api('/api/set', { path, value });
+    toast('Policy updated: ' + path.split('.').pop());
+    await refresh();
+  } catch (e) { toast(String(e), true); }
+}
+
+async function advance(unit) {
+  if (BUSY) return;
+  BUSY = true;
+  try {
+    const r = await api('/api/advance', { unit });
+    await refresh();
+    const evs = r.result.events || [];
+    const blocked = evs.some(e => e.blocking);
+    if (blocked) toast('The clock stopped: something needs your attention.');
+  } catch (e) { toast(String(e), true); }
+  finally { BUSY = false; }
+}
+
+/* ---------------- refresh & routing ---------------- */
+async function refresh() {
+  SUM = await api('/api/summary');
+  if (SUM.no_game) { showSaves(); return; }
+  $('savescreen').classList.add('hidden');
+  $('topbar').classList.remove('hidden');
+  $('layout').classList.remove('hidden');
+  renderTopbar();
+  renderNav();
+  await renderTab();
+  renderEventModal();
+}
+
+function renderTopbar() {
+  const b = SUM.bank;
+  $('tb-name').textContent = b.name;
+  $('tb-date').textContent = SUM.time.date;
+  $('tb-assets').textContent = fmc(b.assets);
+  $('tb-cash').textContent = fmc(b.cash);
+  $('tb-equity').textContent = fmc(b.equity);
+  const ni = $('tb-ni');
+  ni.textContent = fmc(b.ni_mtd);
+  ni.className = cls(b.ni_mtd);
+  const reg = SUM.regulation;
+  const pcaColor = reg.pca === 'well' ? 'g' : reg.pca === 'adequate' ? 'y' : 'r';
+  $('tb-pca').innerHTML =
+    `<span class="pill ${pcaColor}">${esc(reg.pca.toUpperCase())}</span> ` +
+    `<span class="pill ${reg.camels.composite <= 2 ? 'g' : reg.camels.composite === 3 ? 'y' : 'r'}">CAMELS ${reg.camels.composite}</span>`;
+}
+
+const TABS = [
+  ['dashboard', 'Dashboard'], ['lending', 'Lending'], ['deposits', 'Deposits'],
+  ['treasury', 'Treasury'], ['ops', 'Operations'], ['risk', 'Risk & Reg'],
+  ['markets', 'Markets'], ['reports', 'Reports'], ['ledger', 'Ledger'],
+  ['events', 'Events'],
+];
+
+function renderNav() {
+  const counts = SUM.counts || {};
+  const badges = {
+    lending: counts.loan_queue || 0,
+    risk: counts.fraud_cases || 0,
+    events: (SUM.pending || []).length,
+  };
+  $('nav').innerHTML = TABS.map(([id, label]) =>
+    `<div class="tab ${TAB === id ? 'active' : ''}" onclick="switchTab('${id}')">
+       <span>${label}</span>${badges[id] ? `<span class="badge">${badges[id]}</span>` : ''}
+     </div>`).join('');
+}
+
+async function switchTab(id) {
+  TAB = id;
+  renderNav();
+  await renderTab();
+}
+
+async function section(name) {
+  SEC[name] = await api('/api/section?name=' + name);
+  return SEC[name];
+}
+
+async function renderTab() {
+  const m = $('main');
+  if (SUM.game_over) { renderGameOver(m); return; }
+  try {
+    if (TAB === 'dashboard') await tabDashboard(m);
+    else if (TAB === 'lending') await tabLending(m);
+    else if (TAB === 'deposits') await tabDeposits(m);
+    else if (TAB === 'treasury') await tabTreasury(m);
+    else if (TAB === 'ops') await tabOps(m);
+    else if (TAB === 'risk') await tabRisk(m);
+    else if (TAB === 'markets') await tabMarkets(m);
+    else if (TAB === 'reports') await tabReports(m);
+    else if (TAB === 'ledger') await tabLedger(m);
+    else if (TAB === 'events') await tabEvents(m);
+  } catch (e) {
+    m.innerHTML = `<div class="banner red">Failed to render: ${esc(e)}</div>`;
+  }
+}
+
+function renderGameOver(m) {
+  const g = SUM.game_over;
+  m.innerHTML = `
+    <div class="banner ${g.kind === 'sold' ? 'amber' : 'red'}" style="font-size:16px">
+      ${g.kind === 'seized' ? 'THE BANK HAS FAILED' : 'THE BANK WAS SOLD'}
+    </div>
+    <div class="panel"><p>${esc(g.summary)}</p>
+      <p class="sub" style="margin-top:8px">Final assets: ${fm(g.assets)} · ${g.years} years played · ${esc(g.date)}</p>
+      <div class="btnrow" style="margin-top:12px">
+        <button class="primary" onclick="showSaves()">Back to saves</button>
+      </div>
+    </div>`;
+}
+
+/* ---------------- Dashboard ---------------- */
+async function tabDashboard(m) {
+  const b = SUM.bank, mt = SUM.metrics || {}, e = SUM.econ, reg = SUM.regulation;
+  const crisis = SUM.crisis || {};
+  let warn = '';
+  if (SUM.audit_alarm)
+    warn += `<div class="banner red">AUDIT ALARM: the books do not balance. ${esc(SUM.audit_alarm.problems.join('; '))}</div>`;
+  if (crisis.run_active)
+    warn += `<div class="banner red">DEPOSIT RUN IN PROGRESS — day ${crisis.run_days}. Rumor level ${pct(crisis.rumor, 0)}. Get liquidity. Now.</div>`;
+  else if (crisis.rumor > 0.25)
+    warn += `<div class="banner amber">Depositors are nervous (rumor ${pct(crisis.rumor, 0)}). Watch your uninsured share and capital.</div>`;
+  if (reg.orders && reg.orders.length)
+    warn += `<div class="banner amber">Enforcement actions: ${esc(reg.orders.join(' · '))}</div>`;
+  if (e.recession)
+    warn += `<div class="banner amber">The economy is in recession (GDP ${e.gdp.toFixed(1)}%, unemployment ${e.unemployment}%).</div>`;
+
+  m.innerHTML = `
+    ${warn}
+    <div class="cards">
+      ${card('Total assets', fmc(b.assets))}
+      ${card('Loans', fmc(b.loans), 'LDR ' + (mt.loan_to_deposit != null ? mt.loan_to_deposit.toFixed(2) : '—'))}
+      ${card('Deposits', fmc(b.deposits), 'uninsured ' + pct(mt.uninsured_pct, 0))}
+      ${card('Equity', fmc(b.equity), 'TBV/sh ' + fm(mt.tbv_per_share))}
+      ${card('Net income (TTM)', fmc(mt.net_income_ttm), 'MTD ' + fmc(b.ni_mtd), cls(mt.net_income_ttm))}
+      ${card('ROA / ROE', pct(mt.roa) + ' / ' + pct(mt.roe, 1))}
+      ${card('NIM', pct(mt.nim), 'CoF ' + pct(mt.cost_of_funds))}
+      ${card('Efficiency', pct(mt.efficiency, 0))}
+      ${card('NPAs', pct(mt.npa_ratio), 'reserves/loans ' + pct(mt.reserve_coverage))}
+      ${card('CET1', pct(mt.cet1_ratio, 1), 'leverage ' + pct(mt.leverage_ratio, 1))}
+      ${card('Liquidity', pct(mt.liquidity_ratio, 1), 'of assets')}
+      ${card('Fed funds', pct(e.fed_funds), '10y ' + pct(curveAt(e.curve, 10)))}
+    </div>
+    <div class="grid g3">
+      <div class="panel"><canvas id="ch-assets" class="chart"></canvas></div>
+      <div class="panel"><canvas id="ch-ni" class="chart"></canvas></div>
+      <div class="panel"><canvas id="ch-curve" class="chart"></canvas></div>
+    </div>
+    <div class="grid g2" style="margin-top:12px">
+      <div class="panel">
+        <h3>The economy</h3>
+        <div class="kv">
+          <span class="k">GDP growth</span><span class="v ${cls(e.gdp)}">${e.gdp.toFixed(1)}%</span>
+          <span class="k">Inflation</span><span class="v">${e.inflation.toFixed(1)}%</span>
+          <span class="k">Unemployment</span><span class="v">${e.unemployment.toFixed(1)}%</span>
+          <span class="k">Consumer confidence</span><span class="v">${e.conf.toFixed(0)}</span>
+          <span class="k">Credit stress</span><span class="v ${e.stress > 0.3 ? 'neg' : ''}">${pct(e.stress, 0)}</span>
+          <span class="k">Equity index</span><span class="v">${e.equity_index.toLocaleString()}</span>
+          <span class="k">Housing index</span><span class="v">${e.housing.toFixed(0)}</span>
+          <span class="k">WTI crude</span><span class="v">$${e.oil.toFixed(0)}/bbl</span>
+          <span class="k">Natural gas</span><span class="v">$${e.natgas.toFixed(2)}</span>
+          <span class="k">Cattle</span><span class="v">$${e.cattle.toFixed(0)}/cwt</span>
+          <span class="k">Cotton</span><span class="v">$${e.cotton.toFixed(2)}/lb</span>
+        </div>
+      </div>
+      <div class="panel">
+        <h3>Latest news</h3>
+        <div id="dash-news">${newsList(SUM.log)}</div>
+      </div>
+    </div>`;
+  const hist = (await section('reports')).metrics_history;
+  metricChart('ch-assets', hist, 'assets', { title: 'Total assets', map: v => v / 100, yfmt: v => '$' + fmtCompact(v), color: '#58a6ff' });
+  metricChart('ch-ni', hist, 'net_income_ttm', { title: 'Net income (TTM)', map: v => v / 100, yfmt: v => '$' + fmtCompact(v), color: '#46c78c', zero: true });
+  drawChart($('ch-curve'), [{
+    name: 'yield', color: '#e0b050',
+    data: SUM.econ.curve.map(([t, y]) => ({ x: t, y: y * 100 })),
+  }], { title: 'Yield curve', yfmt: v => v.toFixed(1) + '%', xfmt: v => v + 'y' });
+}
+
+function card(k, v, d, extraCls) {
+  return `<div class="card"><div class="k">${k}</div>
+    <div class="v ${extraCls || ''}">${v}</div>${d ? `<div class="d">${d}</div>` : ''}</div>`;
+}
+function curveAt(curve, tenor) {
+  const p = curve.find(c => c[0] === tenor);
+  return p ? p[1] : null;
+}
+function newsList(log) {
+  return (log || []).slice().reverse().map(ev =>
+    `<div class="newsitem ${ev.blocking ? 'block' : ''}">
+       <span class="nd">${esc(ev.date)}</span>${esc(ev.title)}
+       ${ev.text ? `<a onclick='showText(${JSON.stringify(esc(ev.title))}, ${JSON.stringify(esc(ev.text))})'> …more</a>` : ''}
+     </div>`).join('') || '<span class="sub">Quiet so far.</span>';
+}
+
+/* ---------------- Lending ---------------- */
+const PRODUCT_LABELS = {
+  auto: 'Auto', mortgage: 'Mortgage', heloc: 'HELOC', credit_card: 'Credit card',
+  small_business: 'Small business', ci: 'C&I', cre: 'CRE',
+  construction: 'Construction', ag: 'Agriculture', sba: 'SBA',
+};
+
+async function tabLending(m) {
+  const d = await section('lending');
+  const port = d.portfolio;
+  const prods = Object.keys(PRODUCT_LABELS).filter(p => d.products_enabled.includes(p));
+  m.innerHTML = `
+    <h2>Lending</h2>
+    <div class="cards">
+      ${card('Loan portfolio', fmc(Object.values(port).reduce((a, x) => a + x.balance, 0)))}
+      ${card('Nonperforming', fmc(d.npl_balance))}
+      ${card('Allowance (ACL)', fmc(d.allowance), 'CECL requires ' + fmc(d.reserve_required))}
+      ${card('Monthly capacity', fmc(d.capacity), 'originated ' + fmc(d.originated_mtd))}
+      ${card('Pending approvals', String(d.queue.length))}
+    </div>
+
+    <div class="grid g2">
+    <div class="panel">
+      <h3>Pricing & underwriting (by product)</h3>
+      <div class="helptip">Spread: your pricing vs the market in basis points (negative = undercut to win volume).
+      Standards: 0 = anything with a pulse … 4 = fortress. Limit: cap as % of total loans (0 = none).</div>
+      <table><tr><th>Product</th><th class="r">Mkt rate</th><th class="r">Spread bp</th>
+        <th class="r">Standards</th><th class="r">Limit %</th><th class="r">Balance</th>
+        <th class="r">30-89dpd</th><th class="r">NPL</th></tr>
+      ${prods.map(p => {
+        const st = port[p] || { balance: 0, npl: 0, d3090: 0 };
+        return `<tr>
+          <td>${PRODUCT_LABELS[p]}</td>
+          <td class="r">${pct(d.market_rates[p])}</td>
+          <td class="r"><input type="number" step="5" id="sp-${p}" value="${d.spreads[p]}"
+               onchange="setPol('loans.spreads.${p}', parseInt(this.value))"></td>
+          <td class="r"><select onchange="setPol('loans.standards.${p}', parseInt(this.value))">
+            ${[0,1,2,3,4].map(t => `<option value="${t}" ${d.standards[p]===t?'selected':''}>${['Loose','Easy','Standard','Tight','Fortress'][t]}</option>`).join('')}
+          </select></td>
+          <td class="r"><input type="number" step="5" min="0" max="100" value="${d.limits[p]}"
+               onchange="setPol('loans.limits.${p}', parseInt(this.value))"></td>
+          <td class="r">${fmc(st.balance)}</td>
+          <td class="r ${st.d3090 > 0 ? 'warn' : ''}">${fmc(st.d3090)}</td>
+          <td class="r ${st.npl > 0 ? 'neg' : ''}">${fmc(st.npl)}</td>
+        </tr>`;
+      }).join('')}
+      </table>
+    </div>
+    <div class="panel">
+      <h3>Credit policy</h3>
+      <div class="ctl"><label>Manual approval above $</label>
+        <input type="number" id="apthr" value="${d.approval_threshold / 100}">
+        <button class="small" onclick="setPol('loans.approval_threshold', moneyIn('apthr'))">Set</button></div>
+      <div class="ctl"><label>Queue policy</label>
+        <select onchange="setPol('loans.auto_policy', this.value)">
+          <option value="queue" ${d.auto_policy==='queue'?'selected':''}>Send to my desk</option>
+          <option value="approve_ab" ${d.auto_policy==='approve_ab'?'selected':''}>Auto-approve A/B tiers</option>
+          <option value="decline" ${d.auto_policy==='decline'?'selected':''}>Auto-decline all</option>
+        </select></div>
+      <div class="ctl"><label>Sell new mortgages to secondary %</label>
+        <input type="number" min="0" max="90" value="${Math.round(d.mortgage_sale_frac * 100)}"
+          onchange="setPol('loans.mortgage_sale_frac', parseFloat(this.value)/100)"></div>
+      <div class="sub" style="margin-top:6px">Approved apps: ${d.stats.approved_apps} · declined: ${d.stats.declined_apps}</div>
+
+      <h3>OREO (foreclosed real estate)</h3>
+      ${d.oreo.length ? `<table><tr><th>Market</th><th class="r">Carrying value</th><th class="r">Months held</th></tr>
+        ${d.oreo.map(o => `<tr><td>${esc(o.market)}</td><td class="r">${fm(o.value)}</td><td class="r">${o.months_held}</td></tr>`).join('')}</table>`
+        : '<span class="sub">None. Keep it that way.</span>'}
+    </div>
+    </div>
+
+    <div class="panel" style="margin-top:12px">
+      <h3>Approval queue — loans awaiting your signature</h3>
+      ${d.queue.length ? `<table><tr><th>Borrower</th><th>Product</th><th class="r">Amount</th>
+        <th class="r">Rate</th><th>Tier</th><th class="r">DSCR</th><th class="r">LTV</th>
+        <th>Expires</th><th></th></tr>
+        ${d.queue.map(a => `<tr class="click" onclick='showMemo(${JSON.stringify(a)})'>
+          <td>${esc(a.name)}</td><td>${PRODUCT_LABELS[a.product] || a.product}</td>
+          <td class="r">${fm(a.amount)}</td><td class="r">${pct(a.rate)}</td>
+          <td>${a.tier}</td><td class="r">${a.dscr.toFixed(2)}x</td>
+          <td class="r">${Math.round(a.ltv * 100)}%</td><td>${a.days_left}d</td>
+          <td><button class="small primary" onclick="event.stopPropagation();act('approve_loan',{app_id:${a.id}})">Approve</button>
+              <button class="small danger" onclick="event.stopPropagation();act('decline_loan',{app_id:${a.id}})">Decline</button></td>
+        </tr>`).join('')}</table>`
+        : '<span class="sub">No applications pending. Click a row to read the credit memo when they arrive.</span>'}
+    </div>
+
+    <div class="panel" style="margin-top:12px">
+      <h3>Large credits on the books</h3>
+      ${d.large.length ? `<table><tr><th>Borrower</th><th>Product</th><th>Market</th>
+        <th class="r">Balance</th><th class="r">Rate</th><th>Tier</th><th>Status</th></tr>
+        ${d.large.slice().reverse().map(l => `<tr>
+          <td>${esc(l.name)}</td><td>${PRODUCT_LABELS[l.product] || l.product}</td>
+          <td>${esc(l.market)}</td><td class="r">${fm(l.balance)}</td>
+          <td class="r">${pct(l.rate)}</td><td>${l.tier}</td>
+          <td>${statusPill(l.status)}</td></tr>`).join('')}</table>`
+        : '<span class="sub">No individually-tracked large credits yet.</span>'}
+    </div>`;
+}
+
+function statusPill(s) {
+  const map = { current: 'g', d30: 'y', d60: 'y', d90: 'r', npl: 'r' };
+  return `<span class="pill ${map[s] || 'b'}">${esc(s.toUpperCase())}</span>`;
+}
+
+function showMemo(a) {
+  showText('Credit memo — ' + a.name, a.memo,
+    [['Approve', `act('approve_loan',{app_id:${a.id}});closeText()`, 'primary'],
+     ['Decline', `act('decline_loan',{app_id:${a.id}});closeText()`, 'danger']]);
+}
+
+/* ---------------- Deposits ---------------- */
+const DEP_LABELS = {
+  checking: 'Free checking', checking_int: 'Interest checking', savings: 'Savings',
+  money_market: 'Money market', cd_3m: 'CD 3-month', cd_1y: 'CD 1-year',
+  cd_2y: 'CD 2-year', cd_5y: 'CD 5-year',
+};
+
+async function tabDeposits(m) {
+  const d = await section('deposits');
+  const t = d.totals;
+  m.innerHTML = `
+    <h2>Deposits</h2>
+    <div class="cards">
+      ${card('Total deposits', fmc(t._total), t._accounts.toLocaleString() + ' accounts')}
+      ${card('Cost of deposits', pct(d.cost_of_deposits))}
+      ${card('Uninsured share', pct(d.uninsured, 0), 'over the $250k FDIC limit')}
+      ${card('Money fund yield', pct(d.mmf_rate), 'what hot money can get elsewhere')}
+      ${card('Brokered', fmc(d.brokered.reduce((a, b) => a + b.amount, 0)))}
+    </div>
+    <div class="grid g2">
+    <div class="panel">
+      <h3>Rates (your offset vs the market, bp)</h3>
+      <div class="helptip">Your posted rate tracks the market; the offset is your stance.
+        +50bp wins hot money (money market and CDs move fastest), -50bp fattens margin and bleeds balances.</div>
+      <table><tr><th>Product</th><th class="r">You pay</th><th class="r">Market</th>
+        <th class="r">Offset bp</th><th class="r">Balance</th><th class="r">Accounts</th></tr>
+      ${Object.keys(DEP_LABELS).map(p => `<tr>
+        <td>${DEP_LABELS[p]}</td>
+        <td class="r"><b>${pct(d.effective_rates[p])}</b></td>
+        <td class="r">${p === 'checking' ? '—' : pct(d.market_rates[p] ?? d.market_rates['savings'])}</td>
+        <td class="r">${p === 'checking' ? '—' :
+          `<input type="number" step="5" min="-300" max="300" value="${d.offsets_bp[p]}"
+            onchange="setPol('deposits.offsets_bp.${p}', parseInt(this.value))">`}</td>
+        <td class="r">${fmc(t[p])}</td>
+        <td class="r">${(sumAccounts(d.pools, p)).toLocaleString()}</td>
+      </tr>`).join('')}
+      </table>
+      <div class="ctl" style="margin-top:6px"><label>CD promo bonus (bp on all CDs)</label>
+        <input type="number" step="5" min="0" max="300" value="${Math.round(d.promo_cd_bonus * 10000)}"
+          onchange="setPol('deposits.promo_cd_bonus', parseFloat(this.value)/10000)"></div>
+    </div>
+    <div class="panel">
+      <h3>Fee schedule</h3>
+      <table><tr><th>Fee</th><th class="r">Amount $</th></tr>
+        ${[['monthly_fee', 'Monthly maintenance'], ['overdraft_fee', 'Overdraft'],
+           ['nsf_fee', 'NSF'], ['atm_fee', 'Foreign ATM'], ['wire_fee', 'Outgoing wire'],
+           ['safe_deposit_annual', 'Safe deposit (annual)']].map(([k, label]) => `<tr>
+          <td>${label}</td>
+          <td class="r"><input type="number" step="1" min="0" id="fee-${k}" value="${(d.fees[k] / 100).toFixed(2)}"
+            onchange="setPol('deposits.fees.${k}', Math.round(parseFloat(this.value)*100))"></td>
+        </tr>`).join('')}
+      </table>
+      <div class="helptip">High overdraft fees print money until customers leave and examiners write you up.</div>
+      <h3>Wholesale (brokered) deposits</h3>
+      ${d.brokered.length ? `<table><tr><th class="r">Amount</th><th class="r">Rate</th><th class="r">Months left</th></tr>
+        ${d.brokered.map(b => `<tr><td class="r">${fm(b.amount)}</td><td class="r">${pct(b.rate)}</td>
+          <td class="r">${b.months_left}</td></tr>`).join('')}</table>` : '<span class="sub">None outstanding.</span>'}
+      <div class="ctl" style="margin-top:6px">
+        <label>Issue $</label><input type="number" id="brk-amt" value="1000000">
+        <label>months</label><input type="number" id="brk-term" value="12" style="width:52px">
+        <button class="small" onclick="act('issue_brokered', {amount: moneyIn('brk-amt'), term: numIn('brk-term')})">Issue</button>
+      </div>
+    </div>
+    </div>
+    <div class="panel" style="margin-top:12px">
+      <h3>Deposits by market</h3>
+      <table><tr><th>Market</th>${Object.keys(DEP_LABELS).map(p => `<th class="r">${DEP_LABELS[p]}</th>`).join('')}<th class="r">Total</th></tr>
+      ${Object.entries(d.pools).map(([mid, mk]) => {
+        let tot = 0;
+        const cells = Object.keys(DEP_LABELS).map(p => {
+          const bal = mk.products[p].balance; tot += bal;
+          return `<td class="r">${bal ? fmc(bal) : '·'}</td>`;
+        }).join('');
+        return `<tr><td>${esc(mk.name)}</td>${cells}<td class="r"><b>${fmc(tot)}</b></td></tr>`;
+      }).join('')}
+      </table>
+    </div>`;
+}
+function sumAccounts(pools, p) {
+  return Object.values(pools).reduce((a, mk) => a + mk.products[p].accounts, 0);
+}
+
+/* ---------------- Treasury ---------------- */
+async function tabTreasury(m) {
+  const d = await section('treasury');
+  const s = d.summary;
+  m.innerHTML = `
+    <h2>Treasury — securities, funding, capital</h2>
+    <div class="cards">
+      ${card('Cash', fmc(d.cash), 'fed funds sold ' + fmc(d.fed_funds_sold))}
+      ${card('AFS portfolio', fmc(s.afs_mv), 'book ' + fmc(s.afs_book))}
+      ${card('HTM portfolio', fmc(s.htm_book), 'unrealized ' + fmc(s.htm_unrealized), cls(s.htm_unrealized))}
+      ${card('Portfolio yield', pct(s.yield), 'duration ' + s.duration + 'y')}
+      ${card('AOCI', fmc(d.aoci), 'marks through equity', cls(d.aoci))}
+      ${card('Liquidity ratio', pct(d.liquidity_ratio, 1))}
+      ${s.tainted ? card('HTM STATUS', 'TAINTED', 'no more HTM purchases', 'neg') : ''}
+    </div>
+    <div class="grid g2">
+    <div class="panel">
+      <h3>Buy securities (at market yield off the live curve)</h3>
+      <div class="ctl"><label>Type</label>
+        <select id="buy-type">${['treasury','agency','mbs','muni','corporate'].map(t =>
+          `<option value="${t}">${t} (${pct(d.type_yields[t])} @5y)</option>`).join('')}</select></div>
+      <div class="ctl"><label>Tenor (years)</label><input type="number" id="buy-tenor" value="5" min="0.25" max="30" step="0.25" style="width:60px"></div>
+      <div class="ctl"><label>Par $</label><input type="number" id="buy-par" value="1000000"></div>
+      <div class="ctl"><label>Class</label><select id="buy-cls"><option>AFS</option><option>HTM</option></select></div>
+      <button class="primary small" onclick="act('buy_security', {type: $('buy-type').value, tenor: numIn('buy-tenor'), par: moneyIn('buy-par'), cls: $('buy-cls').value})">Buy</button>
+      <div class="helptip">AFS marks to market through AOCI daily. HTM hides the mark until you're forced to sell — then it all comes out at once.</div>
+
+      <h3>Interest-rate hedges</h3>
+      ${d.hedges.length ? `<table><tr><th>Kind</th><th class="r">Notional</th><th class="r">Fixed/strike</th><th class="r">Months</th></tr>
+        ${d.hedges.map(h => `<tr><td>${esc(h.kind)}</td><td class="r">${fmc(h.notional)}</td>
+          <td class="r">${pct(h.fixed || h.strike)}</td><td class="r">${h.months_left}</td></tr>`).join('')}</table>`
+        : '<span class="sub">No hedges on. Your rate risk is naked.</span>'}
+      <div class="ctl" style="margin-top:6px"><label>Kind</label>
+        <select id="hg-kind"><option value="pay_fixed_swap">Pay-fixed swap</option>
+        <option value="rate_cap">Rate cap</option></select>
+        <label>Notional $</label><input type="number" id="hg-n" value="5000000">
+        <label>Tenor y</label><input type="number" id="hg-t" value="3" style="width:52px">
+        <button class="small" onclick="act('add_hedge', {kind: $('hg-kind').value, notional: moneyIn('hg-n'), tenor: numIn('hg-t')})">Add</button></div>
+    </div>
+    <div class="panel">
+      <h3>Wholesale funding</h3>
+      <div class="kv">
+        <span class="k">FHLB capacity remaining</span><span class="v">${fmc(d.funding.fhlb_capacity)}</span>
+        <span class="k">Fed funds purchased (o/n)</span><span class="v">${fmc(d.funding.ffp)}</span>
+        <span class="k">Discount window drawn</span><span class="v ${d.funding.dw > 0 ? 'neg' : ''}">${fmc(d.funding.dw)}</span>
+        <span class="k">Discount window lifetime uses</span><span class="v">${d.funding.dw_uses}</span>
+      </div>
+      <div class="ctl" style="margin-top:8px"><label>FHLB advance $</label>
+        <input type="number" id="fh-amt" value="2000000">
+        <label>months</label><input type="number" id="fh-term" value="12" style="width:52px">
+        <button class="small" onclick="act('take_fhlb', {amount: moneyIn('fh-amt'), term: numIn('fh-term')})">Draw</button></div>
+      ${d.funding.fhlb.length ? `<table><tr><th class="r">Advance</th><th class="r">Rate</th><th class="r">Months</th><th></th></tr>
+        ${d.funding.fhlb.map(a => `<tr><td class="r">${fm(a.amount)}</td><td class="r">${pct(a.rate)}</td>
+          <td class="r">${a.months_left}</td><td><button class="small" onclick="act('repay_funding',{kind:'fhlb',item_id:${a.id}})">Repay</button></td></tr>`).join('')}</table>` : ''}
+      ${d.funding.subdebt.length ? `<h3>Subordinated debt</h3><table><tr><th class="r">Issue</th><th class="r">Rate</th><th class="r">Months</th></tr>
+        ${d.funding.subdebt.map(a => `<tr><td class="r">${fm(a.amount)}</td><td class="r">${pct(a.rate)}</td><td class="r">${a.months_left}</td></tr>`).join('')}</table>` : ''}
+
+      <h3>Capital actions</h3>
+      <div class="kv">
+        <span class="k">Shares outstanding</span><span class="v">${d.shares.toLocaleString()}</span>
+        <span class="k">Tangible book value</span><span class="v">${fm(d.tbv)}</span>
+        <span class="k">TBV per share</span><span class="v">${fm(Math.round(d.tbv / d.shares))}</span>
+      </div>
+      <div class="ctl" style="margin-top:8px"><label>Raise common $</label>
+        <input type="number" id="cap-amt" value="2000000">
+        <button class="small" onclick="act('raise_common', {amount: moneyIn('cap-amt')})">Raise</button></div>
+      <div class="ctl"><label>Issue preferred $</label>
+        <input type="number" id="pref-amt" value="2000000">
+        <button class="small" onclick="act('issue_preferred', {amount: moneyIn('pref-amt')})">Issue</button></div>
+      <div class="ctl"><label>Issue sub debt $</label>
+        <input type="number" id="sd-amt" value="2000000">
+        <button class="small" onclick="act('issue_subdebt', {amount: moneyIn('sd-amt')})">Issue</button></div>
+      <div class="ctl"><label>Buy back stock $</label>
+        <input type="number" id="bb-amt" value="500000">
+        <button class="small" onclick="act('buyback', {amount: moneyIn('bb-amt')})">Buy back</button></div>
+      <div class="ctl"><label>Dividend payout % of earnings</label>
+        <input type="number" min="0" max="100" value="${d.dividend_payout}"
+          onchange="setPol('policies.dividend_payout', parseInt(this.value))"></div>
+    </div>
+    </div>
+    <div class="panel" style="margin-top:12px">
+      <h3>Securities portfolio (click a lot to sell)</h3>
+      ${d.lots.length ? `<table><tr><th>#</th><th>Type</th><th>Class</th><th class="r">Par</th>
+        <th class="r">Coupon</th><th class="r">Mkt value</th><th class="r">Unrealized</th>
+        <th class="r">Duration</th><th class="r">Matures in</th><th></th></tr>
+        ${d.lots.map(l => {
+          const un = l.mv - l.book;
+          return `<tr><td>${l.id}</td><td>${esc(l.type)}</td><td>${l.cls}</td>
+          <td class="r">${fm(l.par)}</td><td class="r">${pct(l.coupon)}</td>
+          <td class="r">${fm(l.mv)}</td><td class="r ${cls(un)}">${fm(un)}</td>
+          <td class="r">${l.duration.toFixed(1)}y</td><td class="r">${Math.round(l.maturity_m / 12 * 10) / 10}y</td>
+          <td><button class="small ${l.cls === 'HTM' ? 'danger' : ''}"
+            onclick="${l.cls === 'HTM' ? `if(confirm('Selling HTM taints the entire HTM book — every unrealized loss hits equity at once. Sure?'))` : ''}act('sell_security',{lot_id:${l.id}})">Sell</button></td></tr>`;
+        }).join('')}</table>` : '<span class="sub">No securities. Cash is earning fed funds minus a dime.</span>'}
+    </div>`;
+}
+
+/* ---------------- Operations ---------------- */
+const ROLE_LABELS = { tellers: 'Tellers', lenders: 'Lenders', credit_analysts: 'Credit analysts',
+  ops: 'Operations', compliance: 'Compliance', it: 'IT / Security', execs: 'Executives' };
+
+async function tabOps(m) {
+  const d = await section('ops');
+  m.innerHTML = `
+    <h2>Operations</h2>
+    <div class="cards">
+      ${card('Branches', String(d.branches.filter(b => b.open).length))}
+      ${card('Digital platform', 'Level ' + d.digital_level + '/5')}
+      ${card('Core system age', d.core_system_age.toFixed(1) + ' yrs', d.core_system_age > 8 ? 'OUTAGE RISK' : 'healthy', d.core_system_age > 8 ? 'neg' : '')}
+      ${card('Service quality', d.service_quality.toFixed(2))}
+    </div>
+    <div class="grid g2">
+    <div class="panel">
+      <h3>Staff</h3>
+      <table><tr><th>Role</th><th class="r">Count</th><th class="r">Skill</th>
+        <th class="r">Morale</th><th class="r">Salary</th><th></th></tr>
+      ${Object.keys(ROLE_LABELS).map(r => {
+        const s = d.staff[r];
+        return `<tr><td>${ROLE_LABELS[r]}</td><td class="r">${s.count}</td>
+          <td class="r">${s.skill.toFixed(1)}</td>
+          <td class="r ${s.morale < 0.6 ? 'neg' : s.morale < 0.75 ? 'warn' : 'pos'}">${Math.round(s.morale * 100)}%</td>
+          <td class="r">${fmc(s.salary)}/yr</td>
+          <td><button class="small" onclick="act('hire',{role:'${r}',count:1})">Hire</button>
+              <button class="small" onclick="act('fire',{role:'${r}',count:1})">Cut</button>
+              <button class="small" onclick="act('train',{role:'${r}'})">Train</button></td></tr>`;
+      }).join('')}
+      </table>
+      <div class="ctl" style="margin-top:8px"><label>Pay vs market (1.0 = market)</label>
+        <input type="number" step="0.05" min="0.7" max="2" value="${d.salary_multiplier}"
+          onchange="setPol('ops.salary_multiplier', parseFloat(this.value))"></div>
+      <div class="ctl"><label>Auto-replace departures</label>
+        <select onchange="setPol('ops.auto_backfill', this.value === 'true')">
+          <option value="true" ${d.auto_backfill !== false ? 'selected' : ''}>Yes</option>
+          <option value="false" ${d.auto_backfill === false ? 'selected' : ''}>No (shrink by attrition)</option>
+        </select></div>
+      <div class="helptip">Lenders drive loan volume. Compliance keeps examiners calm. Underpaid people quit; your best lender can defect with their book.</div>
+
+      <h3>Technology</h3>
+      <div class="ctl"><button class="small primary" onclick="act('invest_digital')">Upgrade digital (level ${d.digital_level + 1})</button>
+        <button class="small" onclick="act('upgrade_core')">Replace core system</button></div>
+      <div class="ctl"><label>Cybersecurity $/mo</label>
+        <input type="number" id="cyb" value="${d.cyber_spend / 100}"
+          onchange="setPol('ops.cyber_spend', Math.round(parseFloat(this.value)*100))"></div>
+      <div class="ctl"><label>Internal audit $/mo</label>
+        <input type="number" value="${d.audit_spend / 100}"
+          onchange="setPol('ops.audit_spend', Math.round(parseFloat(this.value)*100))"></div>
+    </div>
+    <div class="panel">
+      <h3>Branches</h3>
+      <table><tr><th>#</th><th>Market</th><th class="r">Monthly cost</th><th>Opened</th><th></th></tr>
+      ${d.branches.filter(b => b.open).map(b => `<tr><td>${b.id}</td>
+        <td>${esc(d.markets[b.market] ? d.markets[b.market].name : b.market)}</td>
+        <td class="r">${fmc(b.monthly_cost)}</td><td>${esc(b.opened)}</td>
+        <td><button class="small danger" onclick="act('close_branch',{branch_id:${b.id}})">Close</button></td></tr>`).join('')}
+      </table>
+      <div class="ctl" style="margin-top:8px"><label>Open branch in</label>
+        <select id="br-mkt">${Object.entries(d.markets).map(([mid, mk]) =>
+          `<option value="${mid}">${esc(mk.name)}</option>`).join('')}</select>
+        <button class="small primary" onclick="act('open_branch', {market: $('br-mkt').value})">Open (~$1.8M+)</button></div>
+
+      <h3>Marketing ($/month by market)</h3>
+      <table><tr><th>Market</th><th class="r">Brand</th><th class="r">Spend $/mo</th></tr>
+      ${Object.entries(d.brand).map(([mid, br]) => `<tr>
+        <td>${esc(d.markets[mid] ? d.markets[mid].name : mid)}</td>
+        <td class="r">${br.toFixed(0)}/100</td>
+        <td class="r"><input type="number" step="500" min="0" value="${(d.marketing[mid] || 0) / 100}"
+          onchange="setPol('ops.marketing.${mid}', Math.round(parseFloat(this.value)*100))"></td>
+      </tr>`).join('')}
+      </table>
+      <div class="helptip">Brand decays ~1.2%/month without spend. Bigger markets need much bigger budgets.</div>
+
+      <h3>Product lines</h3>
+      <table><tr><th>Line</th><th class="r">Requires</th><th class="r">Setup</th><th></th></tr>
+      ${d.unlocks.map(u => `<tr><td>${esc(u.label)}</td>
+        <td class="r">${fmc(u.min_assets)} assets</td><td class="r">${fmc(u.cost)}</td>
+        <td>${u.enabled ? '<span class="pill g">LIVE</span>' :
+          u.available ? `<button class="small primary" onclick="act('unlock_product',{product:'${u.product}'})">Launch</button>`
+                      : '<span class="pill b">TOO SMALL</span>'}</td></tr>`).join('')}
+      </table>
+    </div>
+    </div>`;
+}
+
+/* ---------------- Risk & Reg ---------------- */
+async function tabRisk(m) {
+  const d = await section('risk');
+  const c = d.capital;
+  const camels = d.camels;
+  m.innerHTML = `
+    <h2>Risk & Regulation</h2>
+    <div class="cards">
+      ${card('CET1 ratio', pct(c.cet1_ratio), 'well-cap needs 6.5%', c.cet1_ratio < 0.065 ? 'neg' : 'pos')}
+      ${card('Tier 1 / Total', pct(c.tier1_ratio, 1) + ' / ' + pct(c.total_ratio, 1))}
+      ${card('Leverage', pct(c.leverage_ratio), 'tangible equity ' + pct(c.tang_equity_ratio))}
+      ${card('PCA status', d.pca.toUpperCase(), '', d.pca === 'well' ? 'pos' : 'neg')}
+      ${card('CAMELS', String(camels.composite),
+        `C${camels.C} A${camels.A} M${camels.M} E${camels.E} L${camels.L} S${camels.S}`,
+        camels.composite <= 2 ? 'pos' : camels.composite === 3 ? 'warn' : 'neg')}
+      ${card('Next exam', '~' + d.months_to_exam + ' mo')}
+      ${card('CRA rating', d.cra, '', d.cra === 'Needs to Improve' ? 'neg' : 'pos')}
+    </div>
+    ${d.orders.length ? `<div class="banner amber">Active enforcement: ${esc(d.orders.join(' · '))}</div>` : ''}
+    ${d.thresholds.durbin ? '<div class="sub">Regulatory tier: ' +
+      ['$10B+ (Durbin/CFPB)', d.thresholds.enhanced ? '$50B+ (stress tests)' : '',
+       d.thresholds.lcr ? '$100B+ (LCR)' : '', d.thresholds.gsib ? 'G-SIB' : '']
+      .filter(Boolean).join(' · ') + '</div>' : ''}
+    <div class="grid g3" style="margin-top:10px">
+    <div class="panel">
+      <h3>Interest-rate risk</h3>
+      <div class="kv">
+        <span class="k">Securities duration</span><span class="v">${d.sec_duration}y</span>
+        <span class="k">AOCI (AFS marks)</span><span class="v ${cls(d.aoci)}">${fm(d.aoci)}</span>
+        <span class="k">HTM unrealized</span><span class="v ${cls(d.htm_unrealized)}">${fm(d.htm_unrealized)}</span>
+        <span class="k">Unrealized vs CET1</span>
+        <span class="v ${(-(Math.min(0, d.aoci) + Math.min(0, d.htm_unrealized)) / Math.max(1, c.cet1)) > 0.25 ? 'neg' : ''}">
+          ${pct(-(Math.min(0, d.aoci) + Math.min(0, d.htm_unrealized)) / Math.max(1, c.cet1), 0)}</span>
+      </div>
+      <div class="helptip">This is the Silicon Valley Bank dial. If unrealized losses approach your capital and your uninsured depositors notice, the run starts.</div>
+      <h3>Liquidity & funding</h3>
+      <div class="kv">
+        <span class="k">Liquid assets / assets</span><span class="v">${pct(d.liquidity_ratio, 1)}</span>
+        <span class="k">Wholesale dependence</span><span class="v">${pct(d.wholesale_dependence, 1)}</span>
+        <span class="k">Uninsured deposits</span><span class="v">${pct(d.uninsured, 0)}</span>
+        <span class="k">Run rumor level</span>
+        <span class="v ${d.crisis.rumor > 0.3 ? 'neg' : ''}">${pct(d.crisis.rumor, 0)}</span>
+      </div>
+    </div>
+    <div class="panel">
+      <h3>Fraud command center</h3>
+      <div class="kv">
+        <span class="k">Detection rate</span><span class="v">${pct(d.fraud.detection, 0)}</span>
+        <span class="k">Fraud environment</span><span class="v">${d.fraud.env.toFixed(2)}x</span>
+        <span class="k">False-positive drag</span><span class="v">${pct(d.fraud.false_positive_drag)}</span>
+      </div>
+      <div class="ctl" style="margin-top:6px"><label>Prevention $/mo</label>
+        <input type="number" value="${d.fraud.prevention_spend / 100}"
+          onchange="setPol('fraud.prevention_spend', Math.round(parseFloat(this.value)*100))"></div>
+      <div class="ctl"><label>Detection thresholds</label>
+        <select onchange="setPol('fraud.threshold', parseInt(this.value))">
+          ${[0,1,2,3,4].map(t => `<option value="${t}" ${d.fraud.threshold===t?'selected':''}>${['Wide open','Loose','Balanced','Tight','Paranoid'][t]}</option>`).join('')}
+        </select></div>
+      <h3>Losses by channel (lifetime)</h3>
+      <table>${Object.entries(d.fraud.losses_by_channel).sort((a,b)=>b[1]-a[1]).map(([k, v]) =>
+        `<tr><td>${esc(k)}</td><td class="r">${fm(v)}</td></tr>`).join('')}</table>
+      <h3>Open cases</h3>
+      ${d.fraud.cases.filter(cse => cse.status === 'open').map(cse =>
+        `<div class="newsitem">#${cse.id} ${esc(cse.kind)} — ${esc(cse.name)} (${fm(cse.amount)})
+          <button class="small primary" onclick="act('resolve_fraud_case',{case_id:${cse.id},choice:'act'})">Act now</button>
+          <button class="small" onclick="act('resolve_fraud_case',{case_id:${cse.id},choice:'monitor'})">Monitor</button>
+        </div>`).join('') || '<span class="sub">No open cases.</span>'}
+    </div>
+    <div class="panel">
+      <h3>BSA / AML program</h3>
+      <div class="kv">
+        <span class="k">Program score</span>
+        <span class="v ${d.bsa.score < 0.6 ? 'neg' : 'pos'}">${pct(d.bsa.score, 0)}</span>
+        <span class="k">Weak months</span><span class="v ${d.bsa.weak_months > 5 ? 'neg' : ''}">${d.bsa.weak_months}</span>
+        <span class="k">SARs filed</span><span class="v">${d.bsa.sars_filed}</span>
+        <span class="k">CTRs filed</span><span class="v">${d.bsa.ctrs_filed}</span>
+      </div>
+      <div class="ctl" style="margin-top:6px"><label>BSA program $/mo</label>
+        <input type="number" value="${d.bsa.program_spend / 100}"
+          onchange="setPol('regulation.bsa.program_spend', Math.round(parseFloat(this.value)*100))"></div>
+      <div class="helptip">Underinvest for years and the fine has nine figures in it. Staffing compliance officers matters too.</div>
+      <h3>Exam history</h3>
+      ${d.exam_reports.slice().reverse().map(r =>
+        `<div class="newsitem"><span class="nd">${esc(r.date)}</span>
+          Composite ${r.composite}
+          <a onclick='showText("Report of Examination — ${esc(r.date)}", ${JSON.stringify(esc(r.text))})'>read report</a>
+        </div>`).join('') || '<span class="sub">Not yet examined. They will come.</span>'}
+    </div>
+    </div>`;
+}
+
+/* ---------------- Markets ---------------- */
+async function tabMarkets(m) {
+  const d = await section('markets');
+  m.innerHTML = `
+    <h2>Markets & Competition</h2>
+    <div class="grid g2">
+      <div class="panel"><canvas id="ch-ff" class="chart"></canvas></div>
+      <div class="panel"><canvas id="ch-macro" class="chart"></canvas></div>
+    </div>
+    <div class="panel" style="margin-top:12px">
+      <h3>Your markets — and the ones you could enter (open a branch from Operations)</h3>
+      <table><tr><th>Market</th><th class="r">Population</th><th class="r">Med. income</th>
+        <th class="r">Deposit pool</th><th class="r">Your share</th><th class="r">Branches</th>
+        <th class="r">Brand</th><th class="r">Activity</th><th>Conditions</th></tr>
+      ${Object.entries(d.regions).map(([mid, r]) => `<tr>
+        <td title="${esc(r.note)}">${esc(r.name)}</td>
+        <td class="r">${r.pop.toLocaleString()}</td>
+        <td class="r">$${r.income.toLocaleString()}</td>
+        <td class="r">${fmc(r.deposit_pool)}</td>
+        <td class="r ${r.my_share > 0 ? 'pos' : ''}">${pct(r.my_share, 1)}</td>
+        <td class="r">${r.my_branches}</td>
+        <td class="r">${r.brand ? r.brand.toFixed(0) : '·'}</td>
+        <td class="r ${r.activity > 1.05 ? 'pos' : r.activity < 0.95 ? 'neg' : ''}">${r.activity.toFixed(2)}</td>
+        <td>${r.shock ? `<span class="pill r">${esc(r.shock.name)}</span>` : '<span class="sub">normal</span>'}</td>
+      </tr>`).join('')}
+      </table>
+    </div>
+    <div class="grid g2" style="margin-top:12px">
+    <div class="panel">
+      <h3>Rival banks</h3>
+      <table><tr><th>Bank</th><th>Strategy</th><th class="r">Assets</th><th class="r">Capital</th>
+        <th class="r">NPAs</th><th class="r">ROA</th></tr>
+      ${d.competitors.map(b => `<tr class="${b.alive ? '' : 'sub'}">
+        <td>${esc(b.name)}${b.alive ? '' : ' †'}</td><td>${esc(b.strategy.replace('_', ' '))}</td>
+        <td class="r">${fmc(b.assets)}</td>
+        <td class="r ${b.equity_ratio < 0.06 ? 'neg' : ''}">${pct(b.equity_ratio, 1)}</td>
+        <td class="r ${b.npa_ratio > 0.04 ? 'neg' : ''}">${pct(b.npa_ratio, 1)}</td>
+        <td class="r ${cls(b.roa)}">${pct(b.roa)}</td></tr>`).join('')}
+      </table>
+      ${d.failed.length ? `<div class="sub" style="margin-top:6px">Failures: ${d.failed.map(f => esc(f.name)).join(', ')}</div>` : ''}
+    </div>
+    <div class="panel">
+      <h3>Peer comparison (banks your size)</h3>
+      <table><tr><th>Bank</th><th class="r">Assets</th><th class="r">ROA</th><th class="r">NIM</th>
+        <th class="r">Efficiency</th><th class="r">NPAs</th></tr>
+      <tr style="color:#fff;font-weight:700"><td>YOU</td>
+        <td class="r">${fmc(d.me.assets)}</td><td class="r">${pct(d.me.roa)}</td>
+        <td class="r">${pct(d.me.nim)}</td><td class="r">${pct(d.me.efficiency, 0)}</td>
+        <td class="r">${pct(d.me.npa_ratio)}</td></tr>
+      ${d.peers.map(b => `<tr><td>${esc(b.name)}</td><td class="r">${fmc(b.assets)}</td>
+        <td class="r">${pct(b.roa)}</td><td class="r">${pct(b.nim)}</td>
+        <td class="r">${pct(b.efficiency, 0)}</td><td class="r">${pct(b.npa_ratio)}</td></tr>`).join('')}
+      </table>
+    </div>
+    </div>`;
+  const h = d.econ_history;
+  drawChart($('ch-ff'), [
+    { name: 'fed funds', color: '#e0b050', data: h.map(x => ({ x: x.m, y: x.ff * 100 })) },
+    { name: '10y', color: '#58a6ff', data: h.map(x => ({ x: x.m, y: x.y10 * 100 })) },
+    { name: '2y', color: '#46c78c', data: h.map(x => ({ x: x.m, y: x.y2 * 100 })) },
+  ], { title: 'Rates', yfmt: v => v.toFixed(1) + '%', xfmt: v => 'm' + Math.round(v) });
+  drawChart($('ch-macro'), [
+    { name: 'output gap', color: '#46c78c', data: h.map(x => ({ x: x.m, y: x.gap })) },
+    { name: 'unemployment', color: '#e06060', data: h.map(x => ({ x: x.m, y: x.unemp })) },
+    { name: 'inflation', color: '#e0b050', data: h.map(x => ({ x: x.m, y: x.infl })) },
+  ], { title: 'Macro', xfmt: v => 'm' + Math.round(v), zero: true });
+}
+
+/* ---------------- Reports ---------------- */
+async function tabReports(m) {
+  const d = await section('reports');
+  const bs = d.balance_sheet;
+  const isRow = (label, v, strong) =>
+    `<tr class="${strong ? 'total' : ''}"><td>${label}</td><td class="r ${cls(v)}">${fm(v)}</td></tr>`;
+  m.innerHTML = `
+    <h2>Reports</h2>
+    <div class="grid g3">
+      <div class="panel"><canvas id="rc-roa" class="chart"></canvas></div>
+      <div class="panel"><canvas id="rc-nim" class="chart"></canvas></div>
+      <div class="panel"><canvas id="rc-npa" class="chart"></canvas></div>
+    </div>
+    <div class="grid g3" style="margin-top:10px">
+      <div class="panel"><canvas id="rc-dep" class="chart"></canvas></div>
+      <div class="panel"><canvas id="rc-eq" class="chart"></canvas></div>
+      <div class="panel"><canvas id="rc-eff" class="chart"></canvas></div>
+    </div>
+    <div class="grid g2" style="margin-top:12px">
+    <div class="panel">
+      <h3>Balance sheet</h3>
+      <table>
+        <tr class="section"><td colspan="2">Assets</td></tr>
+        ${bs.assets.map(([l, v]) => isRow(esc(l), v)).join('')}
+        ${isRow('TOTAL ASSETS', bs.total_assets, true)}
+        <tr class="section"><td colspan="2">Liabilities</td></tr>
+        ${bs.liabilities.map(([l, v]) => isRow(esc(l), v, l === 'Total deposits')).join('')}
+        ${isRow('TOTAL LIABILITIES', bs.total_liabilities, true)}
+        <tr class="section"><td colspan="2">Equity</td></tr>
+        ${bs.equity.map(([l, v]) => isRow(esc(l), v)).join('')}
+        ${isRow('TOTAL EQUITY', bs.total_equity, true)}
+      </table>
+    </div>
+    <div class="panel">
+      <h3>Income statement</h3>
+      <table><tr><th></th><th class="r">Month to date</th><th class="r">Last quarter</th><th class="r">Trailing 12m</th></tr>
+      ${d.income_mtd.lines.map((row, i) => {
+        const [label] = row;
+        const q = d.income_q.lines[i], y = d.income_ttm.lines[i];
+        const strong = label === label.toUpperCase();
+        return `<tr class="${strong ? 'total' : ''}"><td>${esc(label)}</td>
+          <td class="r ${cls(row[1])}">${fm(row[1])}</td>
+          <td class="r ${cls(q[1])}">${fm(q[1])}</td>
+          <td class="r ${cls(y[1])}">${fm(y[1])}</td></tr>`;
+      }).join('')}
+      </table>
+      <h3>Full P&amp;L line detail (trailing 12m)</h3>
+      <table>${d.income_ttm.detail.filter(x => x[1] !== 0).map(([l, v]) =>
+        `<tr><td>${esc(l)}</td><td class="r">${fm(v)}</td></tr>`).join('')}</table>
+      <h3>Call reports filed</h3>
+      <div class="sub">${d.call_reports.length ? d.call_reports.map(cr =>
+        `${esc(cr.date)} (CAMELS ${cr.camels}, ${esc(cr.pca)})`).join(' · ') : 'none yet'}</div>
+    </div>
+    </div>`;
+  const h = d.metrics_history;
+  metricChart('rc-roa', h, 'roa', { title: 'ROA', map: v => v * 100, yfmt: v => v.toFixed(1) + '%', color: '#46c78c', zero: true });
+  metricChart('rc-nim', h, 'nim', { title: 'Net interest margin', map: v => v * 100, yfmt: v => v.toFixed(1) + '%', color: '#58a6ff' });
+  metricChart('rc-npa', h, 'npa_ratio', { title: 'Nonperforming assets', map: v => v * 100, yfmt: v => v.toFixed(2) + '%', color: '#e06060', zero: true });
+  metricChart('rc-dep', h, 'deposits', { title: 'Deposits', map: v => v / 100, yfmt: v => '$' + fmtCompact(v), color: '#e0b050' });
+  metricChart('rc-eq', h, 'equity', { title: 'Equity', map: v => v / 100, yfmt: v => '$' + fmtCompact(v), color: '#46c78c' });
+  metricChart('rc-eff', h, 'efficiency', { title: 'Efficiency ratio', map: v => v * 100, yfmt: v => v.toFixed(0) + '%', color: '#e06060' });
+}
+
+/* ---------------- Ledger ---------------- */
+let LEDGER_FILTER = '';
+async function tabLedger(m) {
+  const d = await section('ledger');
+  const entries = d.entries.slice().reverse().filter(e =>
+    !LEDGER_FILTER || e.lines.some(l => l[0] === LEDGER_FILTER));
+  m.innerHTML = `
+    <h2>General ledger <span class="sub">— trial balance: ${d.trial_balance === 0 ?
+      '<span class="pos">BALANCED (0)</span>' : `<span class="neg">OFF BY ${d.trial_balance}¢</span>`}</span></h2>
+    <div class="grid g2">
+    <div class="panel">
+      <h3>Chart of accounts (click to filter journal)</h3>
+      <table><tr><th>Code</th><th>Account</th><th class="r">Balance</th></tr>
+      ${Object.entries(d.balances).map(([code, a]) => `
+        <tr class="click ${LEDGER_FILTER === code ? 'total' : ''}" onclick="LEDGER_FILTER=LEDGER_FILTER==='${code}'?'':'${code}';renderTab()">
+          <td class="mono">${code}</td><td>${esc(a.name)}</td>
+          <td class="r ${cls(a.balance)}">${fm(a.balance)}</td></tr>`).join('')}
+      </table>
+    </div>
+    <div class="panel">
+      <h3>Journal ${LEDGER_FILTER ? `— filtered to ${LEDGER_FILTER} <button class="small" onclick="LEDGER_FILTER='';renderTab()">clear</button>` : '(most recent first)'}</h3>
+      ${entries.slice(0, 120).map(e => `
+        <div class="newsitem"><span class="nd">${esc(e.date)}</span> ${esc(e.memo)}
+          <table style="margin:2px 0 4px 60px;width:auto">${e.lines.map(l =>
+            `<tr><td class="mono">${l[0]}</td>
+             <td class="r mono" style="min-width:90px">${l[1] ? fm(l[1]) : ''}</td>
+             <td class="r mono" style="min-width:90px">${l[2] ? fm(l[2]) : ''}</td></tr>`).join('')}
+          </table></div>`).join('') || '<span class="sub">No entries match.</span>'}
+    </div>
+    </div>`;
+}
+
+/* ---------------- Events ---------------- */
+async function tabEvents(m) {
+  const d = await section('events');
+  m.innerHTML = `
+    <h2>Events & news</h2>
+    ${d.pending.length ? `<div class="panel"><h3>Needs attention</h3>
+      ${d.pending.map(ev => `<div class="newsitem block">
+        <span class="nd">${esc(ev.date)}</span><b>${esc(ev.title)}</b>
+        <button class="small" onclick="openEvent(${ev.id})">Open</button>
+      </div>`).join('')}</div>` : ''}
+    <div class="panel" style="margin-top:10px"><h3>Full log</h3>
+      ${newsList(d.log)}
+    </div>`;
+}
+
+/* ---------------- Event modal ---------------- */
+function renderEventModal() {
+  const pend = (SUM.pending || []).filter(e => e.blocking);
+  const box = $('eventmodal');
+  if (!pend.length) { box.classList.add('hidden'); box.innerHTML = ''; return; }
+  const ev = pend[0];
+  box.classList.remove('hidden');
+  let controls = '';
+  if (ev.type === 'fdic_auction') {
+    controls = `<div class="ctl"><label>Your bid: deposit premium (bp)</label>
+        <input type="number" id="bid-bp" value="80" min="0" max="1000"></div>
+      <div class="btnrow">
+        <button class="primary" onclick="eventChoice(${ev.id}, 'bid', {premium_bp: numIn('bid-bp')})">Submit bid</button>
+        <button onclick="eventChoice(${ev.id}, 'pass')">Pass</button></div>`;
+  } else if (ev.type === 'bank_for_sale') {
+    controls = `<div class="btnrow">
+      <button class="primary" onclick="eventChoice(${ev.id}, 'buy')">Buy it</button>
+      <button onclick="eventChoice(${ev.id}, 'pass')">Pass</button></div>`;
+  } else if (ev.type === 'buyout_offer') {
+    controls = `<div class="btnrow">
+      <button class="danger" onclick="eventChoice(${ev.id}, 'accept')">Sell the bank</button>
+      <button class="primary" onclick="eventChoice(${ev.id}, 'decline')">Decline</button></div>`;
+  } else if (ev.type === 'fraud_case') {
+    controls = `<div class="btnrow">
+      <button class="primary" onclick="eventChoice(${ev.id}, 'act')">Act now (freeze / intervene)</button>
+      <button onclick="eventChoice(${ev.id}, 'monitor')">Keep monitoring</button></div>`;
+  } else {
+    controls = `<div class="btnrow">
+      <button class="primary" onclick="dismissEvent(${ev.id})">Acknowledged</button></div>`;
+  }
+  box.innerHTML = `<div class="modalbox">
+    <h2>${esc(ev.title)}</h2>
+    <div class="sub">${esc(ev.date)}${pend.length > 1 ? ` · ${pend.length - 1} more waiting` : ''}</div>
+    <pre>${esc(ev.text || '')}</pre>
+    ${controls}
+  </div>`;
+}
+
+async function eventChoice(id, choice, extra) {
+  try {
+    const payload = Object.assign({ event_id: id, choice }, extra || {});
+    const r = await api('/api/action', { action: 'event_choice', payload });
+    if (r.result && r.result.message) toast(r.result.message);
+    await refresh();
+  } catch (e) { toast(String(e), true); }
+}
+async function dismissEvent(id) {
+  try {
+    await api('/api/action', { action: 'dismiss_event', payload: { event_id: id } });
+    await refresh();
+  } catch (e) { toast(String(e), true); }
+}
+function openEvent(id) {
+  const ev = (SUM.pending || []).find(e => e.id === id) ||
+             (SUM.log || []).find(e => e.id === id);
+  if (!ev) return;
+  if (ev.blocking || ev.choices) {
+    SUM.pending = [ev].concat((SUM.pending || []).filter(e => e.id !== id));
+    renderEventModal();
+  } else showText(ev.title, ev.text || '');
+}
+
+/* ---------------- text modal ---------------- */
+function showText(title, text, buttons) {
+  const box = $('textmodal');
+  box.classList.remove('hidden');
+  const btns = (buttons || []).map(([label, code, klass]) =>
+    `<button class="${klass || ''}" onclick="${code}">${label}</button>`).join('');
+  box.innerHTML = `<div class="modalbox">
+    <h2>${title}</h2><pre>${text}</pre>
+    <div class="btnrow">${btns}<button onclick="closeText()">Close</button></div>
+  </div>`;
+}
+function closeText() { $('textmodal').classList.add('hidden'); $('textmodal').innerHTML = ''; }
+
+/* ---------------- saves ---------------- */
+async function showSaves() {
+  const d = await api('/api/saves');
+  $('topbar').classList.add('hidden');
+  $('layout').classList.add('hidden');
+  const sc = $('savescreen');
+  sc.classList.remove('hidden');
+  sc.innerHTML = `
+    <h2 style="font-size:22px;margin-bottom:4px">🏦 Bank Game</h2>
+    <p class="sub" style="margin-bottom:16px">A courthouse square in West Texas. $20 million in assets. Three employees. Your move.</p>
+    <div class="panel">
+      <h3>New bank</h3>
+      <div class="ctl"><label>Bank name</label>
+        <input type="text" id="new-name" class="wide" value="First National Bank of Caprock"></div>
+      <div class="ctl"><label>Seed (optional — same seed, same world)</label>
+        <input type="text" id="new-seed" placeholder="random"></div>
+      <div style="margin-top:8px"><button class="primary" onclick="newGame()">Charter the bank</button></div>
+    </div>
+    <div class="panel">
+      <h3>Saved banks</h3>
+      ${d.saves.length ? `<table><tr><th>Name</th><th>Date reached</th><th class="r">Seed</th><th></th></tr>
+        ${d.saves.map(s => `<tr>
+          <td>${esc(s.name)}</td><td>${esc(s.date)}</td><td class="r mono">${s.seed}</td>
+          <td><button class="small primary" onclick="loadSave(${JSON.stringify(esc(s.name))})">Load</button>
+              <button class="small danger" onclick="if(confirm('Delete this save?'))deleteSave(${JSON.stringify(esc(s.name))})">Delete</button></td>
+        </tr>`).join('')}</table>` : '<span class="sub">No saved banks yet.</span>'}
+    </div>
+    ${d.current ? `<div class="panel">
+      <h3>Roll back "${esc(d.current)}"</h3>
+      <div class="helptip">Return to an earlier autosave. Everything after it is discarded.</div>
+      <table><tr><th>Day</th><th>Date</th><th></th></tr>
+      ${d.snapshots.slice(0, 25).map(s => `<tr>
+        <td class="mono">#${s.day_index}</td><td>${esc(s.date)} ${s.quarter_end ? '<span class="pill b">Q-END</span>' : ''}</td>
+        <td><button class="small" onclick="rollback(${s.day_index})">Roll back here</button></td></tr>`).join('')}
+      </table></div>` : ''}`;
+}
+async function newGame() {
+  try {
+    const seedRaw = $('new-seed').value.trim();
+    const body = { name: $('new-name').value.trim() || 'First National Bank of Caprock' };
+    if (seedRaw) body.seed = parseInt(seedRaw) || 0;
+    const r = await api('/api/new', body);
+    toast('Charter granted. Seed: ' + r.seed);
+    await refresh();
+  } catch (e) { toast(String(e), true); }
+}
+async function loadSave(name) {
+  try { await api('/api/load', { name }); await refresh(); }
+  catch (e) { toast(String(e), true); }
+}
+async function deleteSave(name) {
+  try { await api('/api/delete_save', { name }); await showSaves(); }
+  catch (e) { toast(String(e), true); }
+}
+async function rollback(day) {
+  try { await api('/api/rollback', { day_index: day }); toast('Rolled back.'); await refresh(); }
+  catch (e) { toast(String(e), true); }
+}
+
+/* ---------------- keyboard ---------------- */
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+  if (e.key === ' ') { e.preventDefault(); advance('day'); }
+  else if (e.key === 'w') advance('week');
+  else if (e.key === 'm') advance('month');
+  else if (e.key === 'q') advance('quarter');
+});
+
+refresh().catch(e => {
+  document.body.innerHTML = '<div class="banner red" style="margin:40px">Cannot reach the game server: '
+    + esc(e) + '</div>';
+});
