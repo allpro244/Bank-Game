@@ -29,7 +29,7 @@ def new_fraud():
         "prevention_spend": 3_000_00,   # monthly, player lever
         "threshold": 2,                 # 0 loose .. 4 tight, player lever
         "env": 1.0,                     # ambient fraud intensity, drifts
-        "false_positive_drag": 0.01,
+        "false_positive_drag": 0.006,   # (threshold-1)*0.006 at default 2
         "cases": [],                    # open cases for the player
         "next_case_id": 1,
         "losses_ytd": 0,
