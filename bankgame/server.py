@@ -28,9 +28,6 @@ class Game:
         self.store = Store()
         self.state = None
         self.lock = threading.RLock()
-        saves = self.store.list_saves()
-        if saves:
-            self.state = self.store.load(saves[0]["name"])
 
     # ------------- payload builders -------------
     def summary(self):
@@ -67,6 +64,7 @@ class Game:
                 "orders": s["regulation"]["orders"],
                 "cra": s["regulation"]["cra"],
                 "months_to_exam": s["regulation"]["months_to_exam"],
+                "dw_uses": bank["funding"].get("discount_window_uses", 0),
             },
             "econ": {
                 "fed_funds": econ["fed_funds"], "inflation": econ["inflation"],
@@ -172,6 +170,7 @@ class Game:
                 "tbv": L.total_equity(ledger) - ledger["balances"]["1600"],
                 "dividend_payout": bank["policies"]["dividend_payout"],
                 "aoci": -ledger["balances"]["3200"],
+                "overnight_policy": bank["funding"].get("overnight_policy", "ask"),
             }
 
         if name == "ops":
@@ -181,6 +180,9 @@ class Game:
                                 "min_assets": min_a, "cost": cost,
                                 "enabled": prod in bank["products_enabled"],
                                 "available": bank["cached_assets"] >= min_a})
+            from .sim import operations as OPS
+            previews = {mid: OPS.preview_branch(s, mid)
+                        for mid in s["regions"]}
             return {
                 "branches": bank["ops"]["branches"],
                 "staff": bank["ops"]["staff"],
@@ -195,6 +197,8 @@ class Game:
                 "unlocks": unlocks,
                 "markets": {mid: {"name": r["name"], "kind": r["kind"]}
                             for mid, r in s["regions"].items()},
+                "previews": previews,
+                "kind_order": list(OPS.KIND_ORDER),
             }
 
         if name == "risk":

@@ -20,6 +20,85 @@ BRANCH_OPEN_COST = 1_800_000_00
 BRANCH_MONTHLY = 12_000_00
 BRANCH_CLOSE_COST = 350_000_00
 
+KIND_ORDER = ("rural", "small_metro", "suburb", "metro", "money_center")
+
+
+def branch_open_cost(region):
+    kind = region["kind"]
+    return int(BRANCH_OPEN_COST * (2.5 if kind == "money_center"
+                                   else 1.6 if kind == "metro" else 1.0))
+
+
+def branch_monthly_cost(region, quality=2):
+    kind = region["kind"]
+    return int(BRANCH_MONTHLY * (1 + 0.3 * (quality - 2))
+               * (3.0 if kind == "money_center"
+                  else 1.8 if kind == "metro" else 1.0))
+
+
+def preview_branch(state, market_id, quality=2):
+    """What opening a branch here would do. Numbers use the same share
+    helpers as the monthly deposit flow."""
+    region = state["regions"].get(market_id)
+    if region is None:
+        return {"error": "unknown market"}
+    from . import ledger as L
+    from . import deposits as DEP
+    from .regulation import capital_ratios, pca_category
+
+    cost = branch_open_cost(region)
+    monthly = branch_monthly_cost(region, quality)
+    cash_now = (state["bank"]["ledger"]["balances"]["1000"]
+                + state["bank"]["ledger"]["balances"]["1010"]
+                + state["bank"]["ledger"]["balances"]["1100"])
+    # ensure_cash is mutating — compute affordability without calling it
+    can_fund = cash_now >= cost
+
+    already = any(b.get("market") == market_id and b.get("open")
+                  for b in state["bank"]["ops"]["branches"])
+    # Estimate as if we had one more standard branch in this market.
+    gather = DEP.year1_gather_estimate(state, market_id)
+    if not already:
+        # year1_gather_estimate already pretends presence=1 when score is 0
+        pass
+
+    r = capital_ratios(state)
+    assets = max(1, r["assets"])
+    te = r.get("cet1") or L.total_equity(state["bank"]["ledger"])
+    # Branch: cash → premises (assets unchanged). Then deposits gather:
+    # assets rise by the new deposits, equity does not.
+    new_assets = assets + gather
+    te_ratio = te / max(1, new_assets)
+    cet1 = r["cet1_ratio"]
+    # CET1/RWA barely moves (deposits are not RWA); leverage is the tell.
+    lev = te / max(1, new_assets)
+
+    if not can_fund:
+        verdict = "cannot_fund"
+    elif te_ratio <= 0.03 or lev < 0.03:
+        verdict = "lethal"
+    elif lev < 0.055 or cet1 < 0.07:
+        verdict = "stretch"
+    else:
+        verdict = "safe"
+
+    return {
+        "market": market_id,
+        "name": region["name"],
+        "kind": region["kind"],
+        "cost": cost,
+        "monthly": monthly,
+        "can_fund": can_fund,
+        "already": already,
+        "year1_gather": gather,
+        "pool": region["deposit_pool"],
+        "proforma_leverage": round(lev, 5),
+        "proforma_te_ratio": round(te_ratio, 5),
+        "cet1_now": round(cet1, 5),
+        "pca_now": pca_category(r),
+        "verdict": verdict,
+    }
+
 
 def new_ops():
     return {
@@ -45,17 +124,14 @@ def open_branch(state, market_id, quality=2):
     region = state["regions"].get(market_id)
     if region is None:
         return "unknown market"
-    cost = int(BRANCH_OPEN_COST * (2.5 if region["kind"] == "money_center"
-                                   else 1.6 if region["kind"] == "metro" else 1.0))
+    cost = branch_open_cost(region)
     from .funding import ensure_cash
     if ensure_cash(state, cost) < cost:
         return "not enough cash ($%s needed)" % f"{cost // 100:,}"
     if state["regulation"].get("growth_cap_active") and len(ops["branches"]) > 2:
         return "growth restrictions under your enforcement action block new branches"
     b = {"id": ops["next_branch_id"], "market": market_id, "open": True,
-         "quality": quality, "monthly_cost": int(BRANCH_MONTHLY * (1 + 0.3 * (quality - 2))
-                                                 * (3.0 if region["kind"] == "money_center"
-                                                    else 1.8 if region["kind"] == "metro" else 1.0)),
+         "quality": quality, "monthly_cost": branch_monthly_cost(region, quality),
          "opened": state["time"]["date"]}
     ops["next_branch_id"] += 1
     ops["branches"].append(b)

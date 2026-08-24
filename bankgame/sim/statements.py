@@ -167,7 +167,10 @@ def compute_metrics(state):
 
     last12 = ledger["months"][-12:]
     ni_12 = sum(m["net_income"] for m in last12)
-    scale = 12 / max(1, len(last12))
+    n = max(1, len(last12))
+    # Don't pretend one January is a year. Annualize only once we have
+    # a quarter; still flag partial windows so the UI can say "noisy".
+    scale = 12 / n
     ni_ann = int(ni_12 * scale)
 
     agg = {}
@@ -207,6 +210,8 @@ def compute_metrics(state):
         "leverage_ratio": round(ratios["leverage_ratio"], 5),
         "liquidity_ratio": round(lr, 4),
         "shares": bank["shares"],
+        "partial_window": n < 6,
+        "window_months": n,
     }
     bank["roa_ttm"] = roa
     bank["roe_ttm"] = roe

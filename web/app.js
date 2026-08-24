@@ -180,7 +180,8 @@ async function advance(unit) {
     await refresh();
     const evs = r.result.events || [];
     const blocked = evs.some(e => e.blocking);
-    if (blocked) toast('The clock stopped: something needs your attention.');
+    if (r.result.inbox) toast('The clock stopped: something on Your Desk needs a decision first.');
+    else if (blocked) toast('The clock stopped: something needs your attention.');
   } catch (e) { toast(String(e), true); }
   finally { BUSY = false; }
 }
@@ -210,9 +211,22 @@ function renderTopbar() {
   ni.className = cls(b.ni_mtd);
   const reg = SUM.regulation;
   const pcaColor = reg.pca === 'well' ? 'g' : reg.pca === 'adequate' ? 'y' : 'r';
+  const pcaOwner = {well: 'Solid capital', adequate: 'Adequate',
+    under: 'Undercapitalized', significant: 'Trouble', critical: 'Critical'};
+  const pcaLabel = MODE === 'owner' ? (pcaOwner[reg.pca] || reg.pca)
+                                   : reg.pca.toUpperCase();
+  const camelsLabel = MODE === 'owner'
+    ? ('Report card ' + reg.camels.composite)
+    : ('CAMELS ' + reg.camels.composite);
+  const examMo = reg.months_to_exam;
+  const examLabel = examMo == null ? '' :
+    `<span class="pill ${examMo <= 3 ? 'y' : 'b'}">${MODE === 'owner' ? 'Examiners' : 'Exam'} ${examMo} mo</span>`;
+  const dw = reg.dw_uses || 0;
+  const dwLabel = dw ? `<span class="pill ${dw >= 5 ? 'r' : 'y'}">${MODE === 'owner' ? 'Fed window' : 'Window'} ×${dw}</span>` : '';
   $('tb-pca').innerHTML =
-    `<span class="pill ${pcaColor}">${esc(reg.pca.toUpperCase())}</span> ` +
-    `<span class="pill ${reg.camels.composite <= 2 ? 'g' : reg.camels.composite === 3 ? 'y' : 'r'}">CAMELS ${reg.camels.composite}</span>`;
+    `<span class="pill ${pcaColor}">${esc(pcaLabel)}</span> ` +
+    `<span class="pill ${reg.camels.composite <= 2 ? 'g' : reg.camels.composite === 3 ? 'y' : 'r'}">${esc(camelsLabel)}</span> ` +
+    examLabel + ' ' + dwLabel;
 }
 
 const TABS = [
@@ -239,7 +253,8 @@ function renderNav() {
     `<div style="flex:1;min-height:12px"></div>
      <div class="tab" onclick="showGlossary()"><span>📖 Glossary</span></div>
      <div class="tab" onclick="toggleMode()" title="Owner view: plain language. Banker view: full jargon. Same game.">
-       <span>⇄ ${MODE === 'owner' ? 'Owner view' : 'Banker view'}</span></div>`;
+       <span>⇄ ${MODE === 'owner' ? 'Owner view' : 'Banker view'}</span></div>
+     <div class="helptip" style="padding:8px 14px;line-height:1.35">Keys: space day · w week · m month · q quarter. Week/month/quarter stop if Your Desk has a decision.</div>`;
 }
 
 async function switchTab(id) {
@@ -388,14 +403,23 @@ async function dismissCard(id) {
 async function doSteps(cardId, steps) {
   if (BUSY) return;
   BUSY = true;
+  const notes = [];
   try {
     for (const s of steps) {
-      if (s.kind === 'set') await api('/api/set', { path: s.path, value: s.value });
-      else await api('/api/action', { action: s.action, payload: s.payload });
+      if (s.kind === 'goto') { TAB = s.tab; continue; }
+      if (s.kind === 'set') {
+        await api('/api/set', { path: s.path, value: s.value });
+        notes.push('Policy: ' + String(s.path).split('.').pop());
+      } else {
+        const r = await api('/api/action', { action: s.action, payload: s.payload });
+        if (r.result && r.result.message) notes.push(r.result.message);
+      }
     }
     await api('/api/action', { action: 'advisor_dismiss', payload: { card_id: cardId } });
-    toast('Done. (Everything the advisor did, you could have set by hand.)');
-  } catch (e) { toast(String(e), true); }
+    toast(notes.length ? notes.join(' · ') : 'Done. (You could have set this by hand.)');
+  } catch (e) {
+    toast(notes.length ? ('Partial: ' + notes.join(' · ') + ' — then: ' + e) : String(e), true);
+  }
   finally { BUSY = false; }
   await refresh();
 }
@@ -654,8 +678,15 @@ function statusPill(s) {
 }
 
 function showMemo(a) {
-  showText('Credit memo — ' + a.name, a.memo,
-    [['Approve', `act('approve_loan',{app_id:${a.id}});closeText()`, 'primary'],
+  let body = a.memo || '';
+  if (a.can_fund === false) {
+    body += '\n\nFUNDING WARNING: we do not have the cash to book this whole hold. '
+         + 'Approve will fail until you raise deposits, draw FHLB, or sell bonds.';
+  }
+  const approveClass = a.can_fund === false ? 'danger' : 'primary';
+  const approveLabel = a.can_fund === false ? 'Approve anyway' : 'Approve';
+  showText('Credit memo — ' + a.name, body,
+    [[approveLabel, `act('approve_loan',{app_id:${a.id}});closeText()`, approveClass],
      ['Decline', `act('decline_loan',{app_id:${a.id}});closeText()`, 'danger']]);
 }
 
@@ -793,6 +824,12 @@ async function tabTreasury(m) {
         <span class="k">Discount window drawn</span><span class="v ${d.funding.dw > 0 ? 'neg' : ''}">${fmc(d.funding.dw)}</span>
         <span class="k">Discount window lifetime uses</span><span class="v">${d.funding.dw_uses}</span>
       </div>
+      <div class="ctl" style="margin-top:8px"><label>Overnight shortfall</label>
+        <select onchange="setPol('funding.overnight_policy', this.value)">
+          <option value="ask" ${d.overnight_policy==='ask'?'selected':''}>Ask me (default) — clock stops, window is a choice</option>
+          <option value="auto" ${d.overnight_policy==='auto'?'selected':''}>Auto — FHLB, then fed funds, window last</option>
+        </select></div>
+      <div class="helptip">Ask is the owner default. Auto still logs every window use; examiners count them either way.</div>
       <div class="ctl" style="margin-top:8px"><label>FHLB advance $</label>
         <input type="number" id="fh-amt" value="2000000">
         <label>months</label><input type="number" id="fh-term" value="12" style="width:52px">
@@ -902,9 +939,10 @@ async function tabOps(m) {
         <td><button class="small danger" onclick="act('close_branch',{branch_id:${b.id}})">Close</button></td></tr>`).join('')}
       </table>
       <div class="ctl" style="margin-top:8px"><label>Open branch in</label>
-        <select id="br-mkt">${Object.entries(d.markets).map(([mid, mk]) =>
-          `<option value="${mid}">${esc(mk.name)}</option>`).join('')}</select>
-        <button class="small primary" onclick="act('open_branch', {market: $('br-mkt').value})">Open (~$1.8M+)</button></div>
+        <select id="br-mkt" onchange="showBranchPreview()">${branchOptions(d)}</select>
+        <button class="small primary" id="br-open" onclick="confirmOpenBranch()">Review & open</button></div>
+      <div class="prevbar" id="prev-branch"></div>
+      <div class="helptip">Peer towns are the intended second county. Dallas and NYC are capital events — the preview says so before you click.</div>
 
       <h3>Marketing ($/month by market)</h3>
       <table><tr><th>Market</th><th class="r">Brand</th><th class="r">Spend $/mo</th></tr>
@@ -927,6 +965,79 @@ async function tabOps(m) {
       </table>
     </div>
     </div>`;
+  showBranchPreview();
+}
+
+const KIND_LABELS = {
+  rural: 'Peer towns', small_metro: 'Small metros', suburb: 'Suburbs',
+  metro: 'Metros', money_center: 'Money centers',
+};
+const VERDICT_TEXT = {
+  cannot_fund: 'Cannot fund — raise capital or sell bonds first',
+  lethal: 'This will dilute you below well-capitalized',
+  stretch: 'Stretch — capital gets tight after the gather',
+  safe: 'Safe for a bank your size',
+};
+
+function branchOptions(d) {
+  const order = d.kind_order || ['rural', 'small_metro', 'suburb', 'metro', 'money_center'];
+  const byKind = {};
+  Object.entries(d.markets || {}).forEach(([mid, mk]) => {
+    const k = mk.kind || 'rural';
+    (byKind[k] = byKind[k] || []).push([mid, mk]);
+  });
+  return order.map(k => {
+    const rows = byKind[k] || [];
+    if (!rows.length) return '';
+    return `<optgroup label="${esc(KIND_LABELS[k] || k)}">${rows.map(([mid, mk]) => {
+      const p = (d.previews || {})[mid] || {};
+      const tag = p.verdict === 'cannot_fund' ? ' — cannot fund'
+        : p.verdict === 'lethal' ? ' — capital event'
+        : p.verdict === 'stretch' ? ' — stretch' : '';
+      return `<option value="${esc(mid)}">${esc(mk.name)} · open ${fmc(p.cost || 0)}${tag}</option>`;
+    }).join('')}</optgroup>`;
+  }).join('');
+}
+
+function showBranchPreview() {
+  const sel = $('br-mkt');
+  const box = $('prev-branch');
+  const btn = $('br-open');
+  if (!sel || !box) return;
+  const d = SEC.ops || {};
+  const p = (d.previews || {})[sel.value];
+  if (!p) { box.textContent = ''; return; }
+  const lev = ((p.proforma_leverage || 0) * 100).toFixed(1);
+  const vtxt = VERDICT_TEXT[p.verdict] || p.verdict;
+  box.innerHTML =
+    `${esc(p.name)}: open ${fm(p.cost)}, ${fm(p.monthly)}/mo, year-1 gather ≈ ${fm(p.year1_gather)}. `
+    + `Pro-forma leverage ${lev}% (${esc(vtxt)}).`;
+  box.className = 'prevbar' + (p.verdict === 'lethal' || p.verdict === 'cannot_fund' ? ' neg' : '');
+  if (btn) {
+    btn.disabled = !p.can_fund;
+    btn.textContent = p.can_fund ? 'Review & open' : 'Cannot fund';
+  }
+}
+
+function confirmOpenBranch() {
+  const sel = $('br-mkt');
+  if (!sel) return;
+  const p = ((SEC.ops || {}).previews || {})[sel.value];
+  if (!p) return;
+  if (!p.can_fund) {
+    toast('Not enough cash to open this branch ($' + Math.round(p.cost / 100).toLocaleString() + ' needed).', true);
+    return;
+  }
+  if (p.verdict === 'lethal' || p.verdict === 'stretch') {
+    const ok = confirm(
+      (p.verdict === 'lethal'
+        ? 'This branch will dilute you below well-capitalized. '
+        : 'This branch is a stretch for your capital. ')
+      + 'Year-1 gather ≈ ' + fm(p.year1_gather)
+      + ', pro-forma leverage ' + ((p.proforma_leverage || 0) * 100).toFixed(1) + '%. Open anyway?');
+    if (!ok) return;
+  }
+  act('open_branch', { market: sel.value });
 }
 
 /* ---------------- Risk & Reg ---------------- */
@@ -1013,8 +1124,8 @@ async function tabRisk(m) {
       <h3>Exam history</h3>
       ${d.exam_reports.slice().reverse().map(r =>
         `<div class="newsitem"><span class="nd">${esc(r.date)}</span>
-          Composite ${r.composite}
-          <a onclick='showText("Report of Examination — ${esc(r.date)}", ${JSON.stringify(esc(r.text))})'>read report</a>
+          ${MODE === 'owner' ? 'Report card' : 'Composite'} ${r.composite}
+          <a onclick='showExam(${JSON.stringify(esc(r.date))}, ${r.composite}, ${JSON.stringify(esc(r.text))})'>read report</a>
         </div>`).join('') || '<span class="sub">Not yet examined. They will come.</span>'}
     </div>
     </div>`;
@@ -1032,7 +1143,8 @@ async function tabMarkets(m) {
     <div class="panel" style="margin-top:12px">
       <h3>Your markets — and the ones you could enter (open a branch from Operations)</h3>
       <table><tr><th>Market</th><th class="r">Population</th><th class="r">Med. income</th>
-        <th class="r">Deposit pool</th><th class="r">Your share</th><th class="r">Branches</th>
+        <th class="r">Deposit pool</th><th class="r">${MODE === 'owner' ? 'Your slice' : 'Your share'}</th>
+        <th class="r">Branches</th>
         <th class="r">Brand</th><th class="r">Activity</th><th>Conditions</th></tr>
       ${Object.entries(d.regions).map(([mid, r]) => `<tr>
         <td title="${esc(r.note)}">${esc(r.name)}</td>
@@ -1050,8 +1162,9 @@ async function tabMarkets(m) {
     <div class="grid g2" style="margin-top:12px">
     <div class="panel">
       <h3>Rival banks</h3>
-      <table><tr><th>Bank</th><th>Strategy</th><th class="r">Assets</th><th class="r">Capital</th>
-        <th class="r">NPAs</th><th class="r">ROA</th></tr>
+      <table><tr><th>Bank</th><th>Strategy</th><th class="r">Assets</th>
+        <th class="r">${dt('cet1', MODE === 'owner' ? 'Capital' : 'Capital')}</th>
+        <th class="r">${dt('npa')}</th><th class="r">${dt('roa')}</th></tr>
       ${d.competitors.map(b => `<tr class="${b.alive ? '' : 'sub'}">
         <td>${esc(b.name)}${b.alive ? '' : ' †'}</td><td>${esc(b.strategy.replace('_', ' '))}</td>
         <td class="r">${fmc(b.assets)}</td>
@@ -1063,8 +1176,9 @@ async function tabMarkets(m) {
     </div>
     <div class="panel">
       <h3>Peer comparison (banks your size)</h3>
-      <table><tr><th>Bank</th><th class="r">Assets</th><th class="r">ROA</th><th class="r">NIM</th>
-        <th class="r">Efficiency</th><th class="r">NPAs</th></tr>
+      <table><tr><th>Bank</th><th class="r">Assets</th>
+        <th class="r">${dt('roa')}</th><th class="r">${dt('nim')}</th>
+        <th class="r">${dt('eff')}</th><th class="r">${dt('npa')}</th></tr>
       <tr style="color:#fff;font-weight:700"><td>YOU</td>
         <td class="r">${fmc(d.me.assets)}</td><td class="r">${pct(d.me.roa)}</td>
         <td class="r">${pct(d.me.nim)}</td><td class="r">${pct(d.me.efficiency, 0)}</td>
@@ -1139,7 +1253,7 @@ async function tabReports(m) {
         `<tr><td>${esc(l)}</td><td class="r">${fm(v)}</td></tr>`).join('')}</table>
       <h3>Call reports filed</h3>
       <div class="sub">${d.call_reports.length ? d.call_reports.map(cr =>
-        `${esc(cr.date)} (CAMELS ${cr.camels}, ${esc(cr.pca)})`).join(' · ') : 'none yet'}</div>
+        `${esc(cr.date)} (${MODE === 'owner' ? 'report card' : 'CAMELS'} ${cr.camels}, ${esc(cr.pca)})`).join(' · ') : 'none yet'}</div>
     </div>
     </div>`;
   const h = d.metrics_history;
@@ -1213,9 +1327,20 @@ function renderEventModal() {
         <button class="primary" onclick="eventChoice(${ev.id}, 'bid', {premium_bp: numIn('bid-bp')})">Submit bid</button>
         <button onclick="eventChoice(${ev.id}, 'pass')">Pass</button></div>`;
   } else if (ev.type === 'bank_for_sale') {
+    const pf = (ev.deal && ev.deal.proforma) || {};
+    const blocked = pf.can_buy === false;
+    const why = (pf.blockers || []).join('; ');
     controls = `<div class="btnrow">
-      <button class="primary" onclick="eventChoice(${ev.id}, 'buy')">Buy it</button>
-      <button onclick="eventChoice(${ev.id}, 'pass')">Pass</button></div>`;
+      <button class="primary" ${blocked ? 'disabled title="' + esc(why) + '"' : ''}
+        onclick="eventChoice(${ev.id}, 'buy')">${blocked ? 'Cannot close' : 'Buy it'}</button>
+      <button onclick="eventChoice(${ev.id}, 'pass')">Pass</button></div>
+      ${blocked ? `<div class="helptip">${esc(why)}</div>` : ''}`;
+  } else if (ev.type === 'overnight_shortfall') {
+    controls = `<div class="btnrow">
+      <button class="primary" onclick="eventChoice(${ev.id}, 'fhlb')">Draw FHLB</button>
+      <button onclick="eventChoice(${ev.id}, 'fed_funds')">Borrow fed funds</button>
+      <button class="danger" onclick="eventChoice(${ev.id}, 'window')">Use the discount window</button>
+      <button onclick="eventChoice(${ev.id}, 'wait')">Wait — shrink originations</button></div>`;
   } else if (ev.type === 'buyout_offer') {
     controls = `<div class="btnrow">
       <button class="danger" onclick="eventChoice(${ev.id}, 'accept')">Sell the bank</button>
@@ -1273,6 +1398,16 @@ function showText(title, text, buttons) {
 }
 function closeText() { $('textmodal').classList.add('hidden'); $('textmodal').innerHTML = ''; }
 
+function showExam(date, composite, text) {
+  const tone = composite <= 2 ? 'they are calm'
+    : composite === 3 ? 'they are watching' : 'they are not happy';
+  const head = MODE === 'owner'
+    ? `Report card: ${composite} — ${tone}.\n\nThe official letter is below.\n\n`
+    : '';
+  showText((MODE === 'owner' ? 'Report card — ' : 'Report of Examination — ') + date,
+           head + (text || ''));
+}
+
 /* ---------------- saves ---------------- */
 async function showSaves() {
   const d = await api('/api/saves');
@@ -1280,9 +1415,18 @@ async function showSaves() {
   $('layout').classList.add('hidden');
   const sc = $('savescreen');
   sc.classList.remove('hidden');
+  const latest = (d.saves || [])[0];
   sc.innerHTML = `
     <h2 style="font-size:22px;margin-bottom:4px">🏦 Bank Game</h2>
     <p class="sub" style="margin-bottom:16px">A courthouse square in West Texas. $20 million in assets. Three employees. Your move.</p>
+    ${latest ? `<div class="panel">
+      <h3>Continue</h3>
+      <p>${esc(latest.name)} — ${esc(latest.date || 'just chartered')}
+        <span class="sub"> · seed ${latest.seed}</span></p>
+      <div style="margin-top:8px">
+        <button class="primary" onclick="loadSave(${JSON.stringify(esc(latest.name))})">Continue this bank</button>
+      </div>
+    </div>` : ''}
     <div class="panel">
       <h3>New bank</h3>
       <div class="ctl"><label>Bank name</label>

@@ -60,6 +60,7 @@ def new_game(name="First National Bank of Caprock", seed=12345):
     _seed_operations(state)
     from . import advisor
     advisor.ensure(state)
+    _seed_first_credit(state)
     bank["cached_assets"] = L.total_assets(bank["ledger"])
     from .regulation import capital_ratios, pca_category
     r = capital_ratios(state)
@@ -162,3 +163,28 @@ def _seed_operations(state):
     ops["staff"]["ops"]["count"] = 1
     ops["brand"]["caprock"] = 24.0
     ops["marketing"]["caprock"] = 1_500_00
+
+
+def _seed_first_credit(state):
+    """A named borrower sitting on the desk on day 1 so the tour is not a lie."""
+    from . import loans as LN
+    bank = state["bank"]
+    amount = 620_000_00
+    rate = LN.offer_rate(state, "ag", "B", "caprock")
+    memo = (
+        "CREDIT MEMO — Culpepper Cattle Co.\n"
+        "Market: Caprock City, TX | Product: AG | Request: $620,000\n"
+        "Proposed rate: %.2f%% | Term: 60 months | Risk tier: B\n"
+        "DSCR: 1.32x | LTV: 68%% | Collateral: crop liens, equipment, and ranch real estate\n"
+        "Local conditions: activity index 1.00, no active local shocks\n"
+        "Analyst note: Acceptable credit with adequate coverage. Watch leverage.\n"
+        "This is your first large credit. Read it. Approve or decline — either "
+        "is a real decision, and the tour will mark it done."
+    ) % (rate * 100)
+    bank["loans"]["next_loan_id"] = 2
+    bank["loans"]["queue"].append({
+        "id": 1, "name": "Culpepper Cattle Co.", "product": "ag",
+        "market": "caprock", "amount": amount, "rate": rate, "tier": "B",
+        "dscr": 1.32, "ltv": 0.68, "memo": memo, "days_left": 90,
+        "term_m": 60, "can_fund": True,
+    })

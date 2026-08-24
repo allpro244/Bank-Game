@@ -729,11 +729,11 @@ loses to an open A/B item.
 ## Status
 
 - [x] Playtest and this plan
-- [ ] Phase A
-- [ ] Phase B
-- [ ] Phase C
+- [x] Phase A (A1 share, A2 preview, A3 M&A size, A4 overnight ask, A5 throttle)
+- [x] Phase B (B1 gauges, B2 title door, B3 owner labels, B4 inbox clock, B5 first credit, B6 shortcuts, B7 exam pill)
+- [x] Phase C (C1 goto actions, C2 hire-lender gate, C3 toast what happened)
 - [ ] Phase D
 - [ ] Phase E
 - [ ] Phase F
-- [ ] Phase G
+- [ ] Phase G (G2 partial-window flag only; G1 bands still open)
 - [ ] Phase H (optional)

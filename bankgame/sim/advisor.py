@@ -43,20 +43,30 @@ def gauges(state):
     out = []
 
     # 1. Earnings
-    roa = m.get("roa", bank.get("roa_ttm", 0.01))
-    eff = m.get("efficiency", 0.6)
-    if roa >= 0.008:
-        st, head = "g", "Making money"
-    elif roa >= 0:
-        st, head = "y", "Thin profits"
+    if not m:
+        out.append({
+            "key": "earnings", "label": "Earnings", "status": "y",
+            "head": "Books just opened", "tab": "reports",
+            "detail": "The first real scorecard prints when January closes. "
+                      "Until then there is no return-on-assets number — anyone "
+                      "quoting one is guessing."})
     else:
-        st, head = "r", "Losing money"
-    out.append({
-        "key": "earnings", "label": "Earnings", "status": st, "head": head,
-        "tab": "reports",
-        "detail": ("Return on assets is %.2f%% over the last year (healthy banks earn "
-                   "0.9-1.3%%). You spend %.0f cents to make each dollar of revenue.")
-                  % (roa * 100, eff * 100)})
+        roa = m.get("roa", 0.0)
+        eff = m.get("efficiency", 0.6)
+        noisy = m.get("partial_window")
+        if roa >= 0.008:
+            st, head = "g", "Making money"
+        elif roa >= 0:
+            st, head = "y", "Thin profits"
+        else:
+            st, head = "r", "Losing money"
+        extra = (" Annualized from only a few months — noisy." if noisy else "")
+        out.append({
+            "key": "earnings", "label": "Earnings", "status": st, "head": head,
+            "tab": "reports",
+            "detail": ("Return on assets is %.2f%% over the last year (healthy banks earn "
+                       "0.9-1.3%%). You spend %.0f cents to make each dollar of revenue.%s")
+                      % (roa * 100, eff * 100, extra)})
 
     # 2. Capital
     r = REG.capital_ratios(state)
@@ -146,9 +156,8 @@ def gauges(state):
         "key": "raterisk", "label": "Rate risk", "status": st, "head": head,
         "tab": "treasury",
         "detail": ("Your bonds are worth %s %s than you paid — paper %s equal to "
-                   "%.0f%% of your capital. This is what killed Silicon Valley Bank: "
-                   "big paper losses plus nervous uninsured depositors. Over 30%% "
-                   "is the danger zone.")
+                   "%.0f%% of your capital. Big paper losses plus nervous uninsured "
+                   "depositors is how a run starts. Over 30%% is the danger zone.")
                   % (_fm(abs(unreal)), "less" if unreal < 0 else "more",
                      "losses" if unreal < 0 else "gains", ratio * 100)})
     return out
@@ -199,6 +208,10 @@ def _act(label, action, payload):
 
 def _plan(label, steps):
     return {"label": label, "steps": steps}
+
+
+def _goto(label, tab):
+    return {"label": label, "steps": [{"kind": "goto", "tab": tab}]}
 
 
 # ---- individual rules (each returns a card dict or None) ----
@@ -321,6 +334,16 @@ def _r_hire_lender(state):
         util = bank["loans"]["stats"].get("originated_mtd", 0) / cap
     if util < 0.88:
         return None
+    m = state["metrics"][-1] if state["metrics"] else {}
+    ldr = m.get("loan_to_deposit") or (
+        LN.total_loans(bank["loans"]) / max(1, L.total_deposits(bank["ledger"])))
+    cash = (bank["ledger"]["balances"]["1000"]
+            + bank["ledger"]["balances"]["1010"]
+            + bank["ledger"]["balances"]["1100"])
+    # Don't recommend hiring into a funding hole — more originations you
+    # cannot book just burns salary.
+    if ldr > 1.05 or cash < 400_000_00:
+        return None
     lenders = bank["ops"]["staff"]["lenders"]
     sal = int(lenders["salary"] * bank["ops"]["salary_multiplier"])
     return _card(
@@ -357,9 +380,9 @@ def _r_rate_risk(state):
         "swap on %s of notional profits when rates rise, offsetting further "
         "damage. (It also gives back some income if rates fall — that's the "
         "price of sleeping at night.)" % (_fm(-unreal), ratio * 100, _fm(notional)),
-        "This exact combination — long bonds bought at low rates, plus "
-        "uninsured depositors who noticed — is how Silicon Valley Bank died "
-        "in 2023. The gauge to watch is 'unrealized vs capital' on Risk & Reg.",
+        "Long bonds bought at low rates plus uninsured depositors who notice "
+        "is a classic run recipe. The gauge to watch is 'unrealized vs capital' "
+        "on Risk & Reg.",
         "treasury",
         [_act("Hedge with a %s pay-fixed swap" % _fm(notional), "add_hedge",
               {"kind": "pay_fixed_swap", "notional": notional, "tenor": 3})])
@@ -563,10 +586,10 @@ def _r_uninsured_watch(state):
         "through a crisis; uninsured ones run at the first headline. Build "
         "the cash buffer, spread large deposits, or accept that one bad "
         "quarter could start a stampede." % (unins * 100, lr * 100),
-        "The 2023 runs (SVB, First Republic) were uninsured-deposit runs "
-        "moving at phone speed. Your rumor gauge on Risk & Reg tracks the "
-        "same dynamics.",
-        "risk", [])
+        "Uninsured depositors run at the first headline. Your rumor gauge "
+        "on Risk & Reg tracks the same dynamics.",
+        "risk",
+        [_goto("Show me the cash and bonds", "treasury")])
 
 
 def _r_exam_prep(state):
@@ -584,10 +607,11 @@ def _r_exam_prep(state):
         "what they see on arrival day is what goes in the report, and a bad "
         "report brings restrictions that last years. Shore these up first."
         % ", ".join(weak),
-        "CAMELS = Capital, Asset quality, Management, Earnings, Liquidity, "
-        "Sensitivity to rates. Each is graded 1-5 from your actual numbers "
-        "(Risk & Reg shows the components).",
-        "risk", [])
+        "The report card is Capital, Asset quality, Management, Earnings, "
+        "Liquidity, Sensitivity to rates. Each is graded 1-5 from your "
+        "actual numbers (Risk & Reg shows the components).",
+        "risk",
+        [_goto("Open Risk & Reg", "risk")])
 
 
 _RULES = [

@@ -232,10 +232,21 @@ def originate_month(state, rng):
     enabled = bank["products_enabled"]
     growth_cap = state["regulation"].get("growth_cap_active", False)
 
-    # funding reality: past ~105% loans/deposits, marginal lending gets
-    # throttled -- wholesale money is expensive and ALCO says no
+    # funding reality: past ~100% loans/deposits, originations shrink
+    # hard before wholesale quietly fills the hole (the player has to
+    # choose FHLB / pay-up / participate — see funding.manage_overnight).
     ldr = total_before / max(1, L.total_deposits(bank["ledger"]))
-    funding_mult = 1.0 if ldr <= 1.05 else max(0.10, 1.0 - (ldr - 1.05) * 1.8)
+    if ldr <= 0.98:
+        funding_mult = 1.0
+    elif ldr <= 1.05:
+        funding_mult = max(0.35, 1.0 - (ldr - 0.98) * 6.0)
+    else:
+        funding_mult = max(0.05, 0.35 - (ldr - 1.05) * 1.6)
+    cash = (bank["ledger"]["balances"]["1000"]
+            + bank["ledger"]["balances"]["1010"]
+            + bank["ledger"]["balances"]["1100"])
+    if cash < max(250_000_00, int(total_before * 0.01)):
+        funding_mult *= 0.35
 
     for market_id in sorted(bank["deposits"]["pools"].keys()):
         region = state["regions"][market_id]
@@ -403,11 +414,19 @@ def _make_application(state, rng, market_id, thr):
         note={"A": "Strong borrower; low risk of loss. Priced accordingly.",
               "B": "Acceptable credit with adequate coverage. Watch leverage.",
               "C": "Marginal coverage; this is a rate-for-risk decision. Exceptions to policy noted."}[tier])
+    cash = (state["bank"]["ledger"]["balances"]["1000"]
+            + state["bank"]["ledger"]["balances"]["1010"]
+            + state["bank"]["ledger"]["balances"]["1100"])
+    can_fund = cash >= amount
+    if not can_fund:
+        memo += ("\nFUNDING: we do not have the cash to book this whole hold. "
+                 "Decline, wait, or (when available) participate a piece.")
     cfg["next_loan_id"] += 1
     return {"id": cfg["next_loan_id"], "name": name, "product": product,
             "market": market_id, "amount": amount, "rate": rate, "tier": tier,
             "dscr": dscr, "ltv": ltv, "memo": memo, "days_left": 60,
-            "term_m": TERM_M.get(product, 60) or 60}
+            "term_m": TERM_M.get(product, 60) or 60,
+            "can_fund": can_fund}
 
 
 def approve_application(state, app, auto=False):
