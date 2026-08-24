@@ -733,7 +733,7 @@ loses to an open A/B item.
 - [x] Phase B (B1 gauges, B2 title Continue + save-row year/assets/CAMELS/PCA, B3 owner labels, B4 inbox clock, B5 seeded first credit + welcome requires a gauge click, B6 shortcuts, B7 exam pill)
 - [x] Phase C (C1 goto actions, C2 hire-lender gate, C3 toast what happened)
 - [x] Phase D (D1 charter options, D2 goals + Desk chip, D3 month digest, D4 autopsy, D5 exam/quarter cards)
-- [ ] Phase E (E1 memo is a decision — why them / if we decline / owner gloss. E2–E4 still open)
-- [ ] Phase F
-- [ ] Phase G (G2 partial-window flag only; G1 bands still open — benign ROA is still ~2.5%)
+- [x] Phase E (E1 memo is a decision; E2 counter + participate; E3 relationship memory; E4 mortgage-sale card and preview)
+- [x] Phase F (F1 news filter to served markets + one national wire; F2 rarer/meaner fraud; F3 sandbox vs historical copy and path; F4 Markets share ceiling)
+- [x] Phase G (G1 opex/PD knobs; G2 no year-ROA until 6 months; G3 L 3–4 only after window/wholesale/hot LDR; G4 opening LDR ~0.75 and cash for one rural branch)
 - [ ] Phase H (optional)

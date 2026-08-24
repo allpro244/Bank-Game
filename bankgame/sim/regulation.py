@@ -305,8 +305,22 @@ def run_exam(state, rng):
 
     lr, _ = liquidity_ratio(state)
     wd = wholesale_dependence(state)
-    Lq = 1 if lr > 0.22 else 2 if lr > 0.13 else 3 if lr > 0.08 else 4 if lr > 0.05 else 5
-    if wd > 0.28:
+    window_uses = bank["funding"].get("discount_window_uses", 0)
+    ldr = total_loans(bank["loans"]) / max(1, LL.total_deposits(bank["ledger"]))
+    # Cash thinness alone is a 2, not a 4. L 3–4 is for decisions the
+    # player made: window, wholesale, or running LDR hot.
+    Lq = 1 if lr > 0.18 else 2 if lr > 0.10 else 3 if lr > 0.06 else 4 if lr > 0.04 else 5
+    if window_uses == 0 and wd < 0.05 and ldr <= 1.05:
+        Lq = min(Lq, 2)
+    if window_uses >= 3:
+        Lq = min(5, max(Lq, 3))
+    if window_uses >= 8:
+        Lq = min(5, max(Lq, 4))
+    if wd > 0.15:
+        Lq = min(5, Lq + 1)
+    if ldr > 1.15:
+        Lq = min(5, max(Lq, 3))
+    if ldr > 1.30:
         Lq = min(5, Lq + 1)
 
     # sensitivity: HTM/AFS unrealized loss vs capital, duration

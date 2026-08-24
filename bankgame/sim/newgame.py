@@ -130,8 +130,8 @@ def _seed_balance_sheet(state):
         ("ci", "B", 1_400_000_00), ("ci", "A", 600_000_00),
         ("cre", "B", 1_700_000_00), ("cre", "A", 800_000_00),
         ("mortgage", "A", 1_900_000_00), ("mortgage", "B", 1_100_000_00),
-        ("auto", "B", 800_000_00), ("auto", "C", 400_000_00),
-        ("small_business", "B", 700_000_00), ("small_business", "C", 300_000_00),
+        ("auto", "B", 700_000_00), ("auto", "C", 300_000_00),
+        ("small_business", "B", 600_000_00), ("small_business", "C", 200_000_00),
     ]
     total_loans = 0
     for prod, tier, amt in loan_seed:
@@ -160,7 +160,7 @@ def _seed_balance_sheet(state):
         else:
             total_sec_htm += par
 
-    cash = 1_400_000_00
+    cash = 1_800_000_00
     fed_bal = 800_000_00
     premises = 500_000_00
     allowance = int(total_loans * 0.0125)
@@ -219,8 +219,9 @@ def _seed_first_credit(state):
         "Analyst note: Acceptable credit with adequate coverage. Watch leverage.\n"
         "Why them: local operator, years in this county, deposits already here.\n"
         "If we decline: they walk to First Cattlemen's Bank.\n"
-        "This is your first large credit. Read it. Approve or decline — either "
-        "is a real decision, and the tour will mark it done."
+        "This is your first large credit. Approve, decline, counter "
+        "(+rate / smaller hold), or participate a piece — each is a real "
+        "decision, and the tour will mark it done."
     ) % (home_name, rate * 100)
     bank["loans"]["next_loan_id"] = 2
     bank["loans"]["queue"].append({
@@ -229,3 +230,5 @@ def _seed_first_credit(state):
         "dscr": 1.32, "ltv": 0.68, "memo": memo, "days_left": 90,
         "term_m": 60, "can_fund": True,
     })
+    LN.remember_relationship(state, "Culpepper Cattle Co.", home, "ag",
+                             "known", {"amount": amount, "tier": "B"})

@@ -27,9 +27,9 @@ TERM_M = {"auto": 60, "mortgage": 360, "heloc": 120, "credit_card": 0,
           "ag": 60, "sba": 120}
 
 # base annual PD by product for tier B, normal times
-BASE_PD = {"auto": 0.019, "mortgage": 0.007, "heloc": 0.009, "credit_card": 0.045,
-           "small_business": 0.028, "ci": 0.016, "cre": 0.012, "construction": 0.030,
-           "ag": 0.022, "sba": 0.032}
+BASE_PD = {"auto": 0.022, "mortgage": 0.008, "heloc": 0.010, "credit_card": 0.050,
+           "small_business": 0.032, "ci": 0.018, "cre": 0.014, "construction": 0.034,
+           "ag": 0.025, "sba": 0.036}
 
 LGD = {"auto": 0.45, "mortgage": 0.22, "heloc": 0.35, "credit_card": 0.90,
        "small_business": 0.55, "ci": 0.45, "cre": 0.35, "construction": 0.50,
@@ -97,7 +97,9 @@ def default_config():
         "oreo": [],                                 # [{value, months_held, market}]
         "reserve_required": 0,
         "ncos_ytd": 0,
-        "stats": {"originated_mtd": 0, "declined_apps": 0, "approved_apps": 0},
+        "stats": {"originated_mtd": 0, "declined_apps": 0, "approved_apps": 0,
+                  "countered_apps": 0, "participated_apps": 0},
+        "relationships": [],
     }
 
 
@@ -105,6 +107,120 @@ def offer_rate(state, product, tier, market_id):
     mkt = C.market_rates(state, market_id)["loan"]
     spread = state["bank"]["loans"]["spreads"][product] / 10000.0
     return round(max(0.005, mkt[product] + spread + TIER_RATE_ADJ[tier]), 5)
+
+
+def relationships(cfg):
+    return cfg.setdefault("relationships", [])
+
+
+def _find_relationship(cfg, name, market=None):
+    for rel in relationships(cfg):
+        if rel["name"] == name and (market is None or rel["market"] == market):
+            return rel
+    return None
+
+
+def remember_relationship(state, name, market, product, outcome, extra=None):
+    """outcome: approved | declined | countered | participated | charged_off | paid."""
+    cfg = state["bank"]["loans"]
+    rel = _find_relationship(cfg, name, market)
+    if rel is None:
+        rel = {"name": name, "market": market, "product": product,
+               "status": "known", "history": [], "times_booked": 0}
+        relationships(cfg).append(rel)
+    rel["product"] = product
+    rel["last"] = extra or {}
+    rel["history"].append({
+        "date": state["time"]["date"], "outcome": outcome,
+        "amount": (extra or {}).get("amount", 0),
+    })
+    rel["history"] = rel["history"][-12:]
+    if outcome in ("approved", "participated"):
+        rel["status"] = "performing"
+        rel["times_booked"] = rel.get("times_booked", 0) + 1
+    elif outcome == "declined":
+        if rel.get("status") != "charged_off":
+            rel["status"] = "declined"
+    elif outcome == "countered":
+        rel["status"] = "performing"
+        rel["times_booked"] = rel.get("times_booked", 0) + 1
+    elif outcome == "charged_off":
+        rel["status"] = "charged_off"
+    elif outcome == "paid":
+        if rel.get("status") != "charged_off":
+            rel["status"] = "performing"
+    return rel
+
+
+def _relationship_line(rel, product):
+    if rel is None:
+        return ""
+    st = rel.get("status")
+    n = rel.get("times_booked", 0)
+    if st == "charged_off":
+        return ("RELATIONSHIP: we charged this name off before. Price it like a "
+                "stranger, or pass.")
+    if st == "declined":
+        return ("RELATIONSHIP: we declined them last time. They came back anyway — "
+                "they remember, and so should we.")
+    if n >= 1 and st == "performing":
+        return ("RELATIONSHIP: performing customer, booked %d time%s. A yes here "
+                "is how a franchise is built." % (n, "s" if n != 1 else ""))
+    return "RELATIONSHIP: we know the name."
+
+
+def counter_terms(app, extra_bp=100, hold_frac=0.70, term_frac=0.75):
+    """What a standard counter looks like. Extra bp 50–150, smaller hold, shorter term."""
+    extra_bp = max(50, min(150, int(extra_bp)))
+    hold_frac = max(0.40, min(0.85, float(hold_frac)))
+    term_frac = max(0.50, min(0.90, float(term_frac)))
+    hold = int(app["amount"] * hold_frac)
+    hold = (hold // 10_000_00) * 10_000_00
+    hold = max(100_000_00, min(hold, app["amount"]))
+    term = max(12, int((app.get("term_m") or 60) * term_frac))
+    rate = round(app["rate"] + extra_bp / 10000.0, 5)
+    return {
+        "extra_bp": extra_bp, "hold_frac": hold_frac,
+        "amount": hold, "rate": rate, "term_m": term,
+        "sold": app["amount"] - hold,
+    }
+
+
+def participate_hold(app, hold_frac=0.40):
+    hold_frac = max(0.25, min(0.50, float(hold_frac)))
+    hold = int(app["amount"] * hold_frac)
+    hold = (hold // 10_000_00) * 10_000_00
+    hold = max(100_000_00, min(hold, app["amount"]))
+    return hold, app["amount"] - hold
+
+
+def mortgage_sale_preview(state, frac=None):
+    """Rough next-month mortgage origination and the cash/gain if we sell `frac`."""
+    cfg = state["bank"]["loans"]
+    if frac is None:
+        frac = cfg.get("mortgage_sale_frac", 0)
+    frac = max(0.0, min(0.90, float(frac)))
+    from .deposits import natural_share
+    year_demand = 0
+    for market_id in sorted(state["bank"]["deposits"]["pools"].keys()):
+        region = state["regions"][market_id]
+        nshare = natural_share(state, market_id)
+        if nshare <= 0:
+            continue
+        year_demand += (region["deposit_pool"] * DEMAND_FACTOR["mortgage"]
+                        * _demand_tilt(region, "mortgage")
+                        * region.get("loan_demand_mult", 1.0) * nshare * 3.0)
+    month = int(year_demand / 12.0)
+    sold = int(month * frac)
+    gain = int(sold * 0.015)
+    mort_bal = sum(p["balance"] for p in cfg["pools"] if p["product"] == "mortgage")
+    mort_bal += sum(l["balance"] for l in cfg["large"]
+                    if l.get("product") == "mortgage"
+                    and l.get("status") not in ("paid", "defaulted"))
+    return {
+        "est_month_orig": month, "frac": frac, "sold": sold, "gain": gain,
+        "kept": month - sold, "mortgage_balance": mort_bal,
+    }
 
 
 def _find_pool(cfg, product, market, tier, year):
@@ -309,7 +425,7 @@ def originate_month(state, rng):
         L.post(bank["ledger"], state["time"]["date"],
                "Loan originations funded (month)",
                [["1300", total_orig, 0], ["1000", 0, total_orig]], tag="loan")
-        fees = int(total_orig * 0.004)
+        fees = int(total_orig * 0.0025)
         if fees > 0:
             L.post(bank["ledger"], state["time"]["date"], "Loan origination fees",
                    [["1000", fees, 0], ["4000", 0, fees]], tag="loan")
@@ -386,11 +502,23 @@ def _make_application(state, rng, market_id, thr):
     dscr = round(max(0.85, rng.normal({"A": 1.55, "B": 1.30, "C": 1.08}[tier], 0.18)), 2)
     ltv = round(min(0.97, max(0.35, rng.normal({"A": 0.58, "B": 0.70, "C": 0.82}[tier], 0.08))), 2)
     cfg = state["bank"]["loans"]
-    is_biz = product != "mortgage"
-    if is_biz:
-        name = "%s %s" % (rng.choice(LAST), rng.choice(BIZ))
+    rel = None
+    returning = [r for r in relationships(cfg)
+                 if r.get("market") == market_id
+                 and r.get("status") in ("performing", "declined", "charged_off")]
+    if returning and rng.chance(0.28):
+        rel = rng.choice(returning)
+        name = rel["name"]
+        if rel.get("product") in state["bank"]["products_enabled"]:
+            product = rel["product"]
+        if rel.get("status") == "charged_off":
+            tier = rng.weighted_choice([("B", 0.35), ("C", 0.65)])
     else:
-        name = "%s %s" % (rng.choice(FIRST), rng.choice(LAST))
+        is_biz = product != "mortgage"
+        if is_biz:
+            name = "%s %s" % (rng.choice(LAST), rng.choice(BIZ))
+        else:
+            name = "%s %s" % (rng.choice(FIRST), rng.choice(LAST))
     rate = offer_rate(state, product, tier, market_id)
     coll = {"ci": "blanket lien on equipment, AR and inventory",
             "cre": "first lien on income-producing property",
@@ -448,30 +576,113 @@ def _make_application(state, rng, market_id, thr):
             + state["bank"]["ledger"]["balances"]["1010"]
             + state["bank"]["ledger"]["balances"]["1100"])
     can_fund = cash >= amount
+    rel_line = _relationship_line(rel, product)
+    if rel_line:
+        memo += "\n" + rel_line
     if not can_fund:
         memo += ("\nFUNDING: we do not have the cash to book this whole hold. "
-                 "Decline, wait, or (when available) participate a piece.")
+                 "Decline, wait, or participate a piece (we keep 25–50%).")
+    else:
+        memo += ("\nOPTIONS: approve the whole hold, counter (+rate / smaller "
+                 "hold / shorter term), participate a piece, or decline.")
     cfg["next_loan_id"] += 1
     return {"id": cfg["next_loan_id"], "name": name, "product": product,
             "market": market_id, "amount": amount, "rate": rate, "tier": tier,
             "dscr": dscr, "ltv": ltv, "memo": memo, "days_left": 60,
             "term_m": TERM_M.get(product, 60) or 60,
-            "can_fund": can_fund}
+            "can_fund": can_fund,
+            "returning": bool(rel)}
 
 
-def approve_application(state, app, auto=False):
+def _book_large(state, app, amount, rate, term_m, auto=False, participated=0):
     bank = state["bank"]
     cfg = bank["loans"]
     L.post(bank["ledger"], state["time"]["date"],
-           "Large loan funded: %s ($%s)" % (app["name"], f"{app['amount'] // 100:,}"),
-           [["1300", app["amount"], 0], ["1000", 0, app["amount"]]], tag="loan")
-    cfg["large"].append({
+           "Large loan funded: %s ($%s)" % (app["name"], f"{amount // 100:,}"),
+           [["1300", amount, 0], ["1000", 0, amount]], tag="loan")
+    rec = {
         "id": app["id"], "name": app["name"], "product": app["product"],
-        "market": app["market"], "balance": app["amount"], "rate": app["rate"],
+        "market": app["market"], "balance": amount, "rate": rate,
         "tier": app["tier"], "dscr": app["dscr"], "ltv": app["ltv"],
-        "term_m": app["term_m"], "age_m": 0, "status": "current",
-        "orig_amount": app["amount"], "auto": auto,
-    })
+        "term_m": term_m, "age_m": 0, "status": "current",
+        "orig_amount": amount, "auto": auto,
+        "participated": participated,
+    }
+    cfg["large"].append(rec)
+    return rec
+
+
+def approve_application(state, app, auto=False):
+    _book_large(state, app, app["amount"], app["rate"], app["term_m"], auto=auto)
+    remember_relationship(state, app["name"], app["market"], app["product"],
+                          "approved", {"amount": app["amount"], "tier": app["tier"]})
+
+
+def decline_application(state, app):
+    remember_relationship(state, app["name"], app["market"], app["product"],
+                          "declined", {"amount": app["amount"], "tier": app["tier"]})
+
+
+def counter_application(state, app, rng, extra_bp=100, hold_frac=0.70):
+    """Offer better terms for us. Borrower accepts or walks (simple roll)."""
+    terms = counter_terms(app, extra_bp=extra_bp, hold_frac=hold_frac)
+    # A-tier walks more; a harsh cut in size or a fat rate bump also walks.
+    walk = 0.18
+    if app["tier"] == "A":
+        walk += 0.16
+    elif app["tier"] == "C":
+        walk -= 0.08
+    walk += max(0.0, (terms["extra_bp"] - 50) / 100.0) * 0.12
+    walk += max(0.0, 0.85 - terms["hold_frac"]) * 0.25
+    if app.get("dscr", 1.2) < 1.15:
+        walk -= 0.08
+    accept = not rng.chance(max(0.08, min(0.72, walk)))
+    if not accept:
+        remember_relationship(state, app["name"], app["market"], app["product"],
+                              "declined",
+                              {"amount": app["amount"], "tier": app["tier"],
+                               "reason": "counter_rejected"})
+        return {"accepted": False,
+                "message": ("%s walked. They took the original ask to another desk."
+                            % app["name"])}
+    app = dict(app)
+    app["amount"] = terms["amount"]
+    app["rate"] = terms["rate"]
+    app["term_m"] = terms["term_m"]
+    _book_large(state, app, terms["amount"], terms["rate"], terms["term_m"])
+    remember_relationship(state, app["name"], app["market"], app["product"],
+                          "countered",
+                          {"amount": terms["amount"], "tier": app["tier"],
+                           "extra_bp": terms["extra_bp"]})
+    return {
+        "accepted": True, "amount": terms["amount"], "rate": terms["rate"],
+        "term_m": terms["term_m"],
+        "message": ("Counter accepted: $%s at %.2f%% for %d months (+%dbp, "
+                    "smaller hold)."
+                    % (f"{terms['amount'] // 100:,}", terms["rate"] * 100,
+                       terms["term_m"], terms["extra_bp"])),
+    }
+
+
+def participate_application(state, app, hold_frac=0.40):
+    """Book 25–50%; the rest is sold to a rival / correspondent. Escape hatch
+    when we cannot fund the whole hold."""
+    hold, sold = participate_hold(app, hold_frac)
+    _book_large(state, app, hold, app["rate"], app["term_m"], participated=sold)
+    fee = int(sold * 0.0025)
+    if fee > 0:
+        L.post(state["bank"]["ledger"], state["time"]["date"],
+               "Participation fee: %s" % app["name"],
+               [["1000", fee, 0], ["4000", 0, fee]], tag="loan")
+    remember_relationship(state, app["name"], app["market"], app["product"],
+                          "participated",
+                          {"amount": hold, "sold": sold, "tier": app["tier"]})
+    return {
+        "hold": hold, "sold": sold, "fee": fee,
+        "message": ("Participated %s: we hold $%s, sold $%s (fee $%s)."
+                    % (app["name"], f"{hold // 100:,}", f"{sold // 100:,}",
+                       f"{fee // 100:,}")),
+    }
 
 
 # ----------------------------------------------------- payments/delinquency
@@ -631,6 +842,8 @@ def _step_large_loans(state, rng, events):
                            [["1000", l["balance"], 0], ["1300", 0, l["balance"]]], tag="loan")
                     l["balance"] = 0
                 l["status"] = "paid"
+                remember_relationship(state, l["name"], l["market"], l["product"],
+                                      "paid", {"amount": l.get("orig_amount", 0)})
                 continue
         pdm = (BASE_PD[l["product"]] / 12.0) * TIER_PD_MULT[l["tier"]] \
             * macro_pd_mult(state, l["product"], l["market"]) \
@@ -649,6 +862,9 @@ def _step_large_loans(state, rng, events):
                 # the charged-off piece leaves 1300 via the aggregate NCO entry
                 l["balance"] -= rec
                 l["status"] = "defaulted"
+                remember_relationship(state, l["name"], l["market"], l["product"],
+                                      "charged_off",
+                                      {"amount": l.get("orig_amount", l["balance"])})
                 events.append({"type": "loan_loss", "blocking": False,
                                "title": "Loss taken: %s" % l["name"],
                                "text": "Workout of %s concluded. Charge-off: $%s. Recovered: $%s."

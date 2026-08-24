@@ -76,6 +76,13 @@ def _empty_chronicle():
     }
 
 
+def allow_svb_name(state):
+    """SVB-style copy only after 2015 on the historical clock."""
+    if (state.get("meta") or {}).get("era") != "historical":
+        return False
+    return int(state["time"]["date"][:4]) >= 2015
+
+
 def display_date(state):
     raw = state["time"]["date"]
     if state.get("meta", {}).get("era") != "sandbox":

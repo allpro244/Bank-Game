@@ -123,6 +123,14 @@ function fmc(cents) {          // compact
   return s + a.toFixed(0);
 }
 function pct(v, dp) { return v == null ? '—' : (v * 100).toFixed(dp == null ? 2 : dp) + '%'; }
+function durationTrapCopy() {
+  const era = (SUM.meta || {}).era;
+  const y = parseInt(((SUM.time || {}).date || '2000').slice(0, 4), 10);
+  if (era === 'historical' && y >= 2015) {
+    return 'This is the Silicon Valley Bank dial. If unrealized losses approach your capital and your uninsured depositors notice, the run starts.';
+  }
+  return 'This is the duration trap. Long bonds bought cheap, then rates rise: paper losses vs capital. Uninsured depositors who notice start the run.';
+}
 function cls(v) { return v > 0 ? 'pos' : v < 0 ? 'neg' : ''; }
 function moneyIn(id) {         // dollars input -> cents
   const v = parseFloat($(id).value);
@@ -480,7 +488,11 @@ async function tabDashboard(m) {
       ${card('Deposits', fmc(b.deposits), dt('uninsured') + ' ' + pct(mt.uninsured_pct, 0))}
       ${card('Equity', fmc(b.equity), dt('tbv') + ' ' + fm(mt.tbv_per_share))}
       ${card('Net income (TTM)', fmc(mt.net_income_ttm), 'MTD ' + fmc(b.ni_mtd), cls(mt.net_income_ttm))}
-      ${card(dt('roa'), pct(mt.roa) + ' / ' + pct(mt.roe, 1), peerNote('roa', mt.roa))}
+      ${card(dt('roa'), mt.earnings_ready === false || mt.roa == null
+        ? '—' : pct(mt.roa) + ' / ' + pct(mt.roe, 1),
+        mt.earnings_ready === false || mt.roa == null
+          ? 'too early for a year rate'
+          : peerNote('roa', mt.roa))}
       ${card(dt('nim'), pct(mt.nim), peerNote('nim', mt.nim) + ' · ' + dt('cof') + ' ' + pct(mt.cost_of_funds))}
       ${card(dt('eff'), pct(mt.efficiency, 0), peerNote('efficiency', mt.efficiency, true))}
       ${card(dt('npa'), pct(mt.npa_ratio), peerNote('npa_ratio', mt.npa_ratio, true) + ' · ' + dt('reserves') + ' ' + pct(mt.reserve_coverage))}
@@ -685,7 +697,17 @@ async function tabLending(m) {
       <div class="ctl"><label>Sell new mortgages to secondary %</label>
         <input type="number" min="0" max="90" value="${Math.round(d.mortgage_sale_frac * 100)}"
           onchange="setPol('loans.mortgage_sale_frac', parseFloat(this.value)/100)"></div>
-      <div class="sub" style="margin-top:6px">Approved apps: ${d.stats.approved_apps} · declined: ${d.stats.declined_apps}</div>
+      <div class="helptip">Selling new 30-year mortgages to the agencies turns them
+        into cash this month (and a small gain) instead of a long asset. Raise this
+        when loans are outrunning deposits. You give up the interest.</div>
+      ${d.mortgage_preview ? `<div class="sub">At ${Math.round((d.mortgage_preview.frac || 0) * 100)}%
+        of an estimated ${fm(d.mortgage_preview.est_month_orig)} next month:
+        sell ${fm(d.mortgage_preview.sold)}, keep ${fm(d.mortgage_preview.kept)},
+        gain about ${fm(d.mortgage_preview.gain)}.</div>` : ''}
+      <div class="sub" style="margin-top:6px">Approved: ${d.stats.approved_apps}
+        · declined: ${d.stats.declined_apps}
+        · countered: ${d.stats.countered_apps || 0}
+        · participated: ${d.stats.participated_apps || 0}</div>
 
       <h3>OREO (foreclosed real estate)</h3>
       ${d.oreo.length ? `<table><tr><th>Market</th><th class="r">Carrying value</th><th class="r">Months held</th></tr>
@@ -705,6 +727,8 @@ async function tabLending(m) {
           <td>${a.tier}</td><td class="r">${a.dscr.toFixed(2)}x</td>
           <td class="r">${Math.round(a.ltv * 100)}%</td><td>${a.days_left}d</td>
           <td><button class="small primary" onclick="event.stopPropagation();act('approve_loan',{app_id:${a.id}})">Approve</button>
+              <button class="small" onclick="event.stopPropagation();act('counter_loan',{app_id:${a.id}})">Counter</button>
+              <button class="small" onclick="event.stopPropagation();act('participate_loan',{app_id:${a.id}})">Participate</button>
               <button class="small danger" onclick="event.stopPropagation();act('decline_loan',{app_id:${a.id}})">Decline</button></td>
         </tr>`).join('')}</table>`
         : '<span class="sub">No applications pending. Click a row to read the credit memo when they arrive.</span>'}
@@ -730,14 +754,22 @@ function statusPill(s) {
 
 function showMemo(a) {
   let body = a.memo || '';
+  const amt = a.amount || 0;
+  const hold70 = Math.max(10000000, Math.round(amt * 0.70 / 1000000) * 1000000);
+  const hold40 = Math.max(10000000, Math.round(amt * 0.40 / 1000000) * 1000000);
+  body += '\n\nCOUNTER: +100bp, hold ' + fm(hold70) + ' (70%), shorter term. '
+        + 'They may walk.\nPARTICIPATE: we book ' + fm(hold40)
+        + ' (40%); the rest is sold. Use this when cash cannot cover the whole hold.';
   if (a.can_fund === false) {
     body += '\n\nFUNDING WARNING: we do not have the cash to book this whole hold. '
-         + 'Approve will fail until you raise deposits, draw FHLB, or sell bonds.';
+         + 'Approve will fail. Participate a piece, or raise deposits / draw FHLB / sell bonds.';
   }
   const approveClass = a.can_fund === false ? 'danger' : 'primary';
   const approveLabel = a.can_fund === false ? 'Approve anyway' : 'Approve';
   showText('Credit memo — ' + a.name, body,
     [[approveLabel, `act('approve_loan',{app_id:${a.id}});closeText()`, approveClass],
+     ['Counter +100bp', `act('counter_loan',{app_id:${a.id}});closeText()`, ''],
+     ['Participate 40%', `act('participate_loan',{app_id:${a.id}});closeText()`, ''],
      ['Decline', `act('decline_loan',{app_id:${a.id}});closeText()`, 'danger']]);
 }
 
@@ -1125,7 +1157,7 @@ async function tabRisk(m) {
         <span class="v ${(-(Math.min(0, d.aoci) + Math.min(0, d.htm_unrealized)) / Math.max(1, c.cet1)) > 0.25 ? 'neg' : ''}">
           ${pct(-(Math.min(0, d.aoci) + Math.min(0, d.htm_unrealized)) / Math.max(1, c.cet1), 0)}</span>
       </div>
-      <div class="helptip">This is the Silicon Valley Bank dial. If unrealized losses approach your capital and your uninsured depositors notice, the run starts.</div>
+      <div class="helptip">${durationTrapCopy()}</div>
       <h3>Liquidity & funding</h3>
       <div class="kv">
         <span class="k">Liquid assets / assets</span><span class="v">${pct(d.liquidity_ratio, 1)}</span>
@@ -1193,16 +1225,19 @@ async function tabMarkets(m) {
     </div>
     <div class="panel" style="margin-top:12px">
       <h3>Your markets — and the ones you could enter (open a branch from Operations)</h3>
-      <table><tr><th>Market</th><th class="r">Population</th><th class="r">Med. income</th>
+      <table><tr><th>Market</th><th>Kind</th><th class="r">Population</th><th class="r">Med. income</th>
         <th class="r">Deposit pool</th><th class="r">${MODE === 'owner' ? 'Your slice' : 'Your share'}</th>
+        <th class="r">$25M ceiling</th>
         <th class="r">Branches</th>
         <th class="r">Brand</th><th class="r">Activity</th><th>Conditions</th></tr>
       ${Object.entries(d.regions).map(([mid, r]) => `<tr>
         <td title="${esc(r.note)}">${esc(r.name)}</td>
+        <td class="sub">${esc(r.kind || '')}</td>
         <td class="r">${r.pop.toLocaleString()}</td>
         <td class="r">$${r.income.toLocaleString()}</td>
         <td class="r">${fmc(r.deposit_pool)}</td>
         <td class="r ${r.my_share > 0 ? 'pos' : ''}">${pct(r.my_share, 1)}</td>
+        <td class="r">${pct(r.ceiling_25m, 2)}</td>
         <td class="r">${r.my_branches}</td>
         <td class="r">${r.brand ? r.brand.toFixed(0) : '·'}</td>
         <td class="r ${r.activity > 1.05 ? 'pos' : r.activity < 0.95 ? 'neg' : ''}">${r.activity.toFixed(2)}</td>

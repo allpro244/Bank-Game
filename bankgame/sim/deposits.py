@@ -156,14 +156,16 @@ def market_maturity(state, market_id):
     return min(1.0, (months_in_market(state, market_id) + 4) / 30.0)
 
 
-def size_share_cap(state, market_id):
+def size_share_cap(state, market_id, assets=None):
     """Max share of the local pool a bank this size can hold."""
     region = state["regions"][market_id]
     pool = max(1, region["deposit_pool"])
-    assets = max(1, state["bank"].get("cached_assets") or 1)
-    if assets <= 1:
-        from . import ledger as _L
-        assets = max(1, _L.total_assets(state["bank"]["ledger"]))
+    if assets is None:
+        assets = max(1, state["bank"].get("cached_assets") or 1)
+        if assets <= 1:
+            from . import ledger as _L
+            assets = max(1, _L.total_assets(state["bank"]["ledger"]))
+    assets = max(1, assets)
     mult = KIND_ASSET_MULT.get(region["kind"], 0.6)
     return (assets * mult) / pool
 

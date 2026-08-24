@@ -167,11 +167,20 @@ def compute_metrics(state):
 
     last12 = ledger["months"][-12:]
     ni_12 = sum(m["net_income"] for m in last12)
-    n = max(1, len(last12))
-    # Don't pretend one January is a year. Annualize only once we have
-    # a quarter; still flag partial windows so the UI can say "noisy".
-    scale = 12 / n
-    ni_ann = int(ni_12 * scale)
+    n = len(last12)
+    # Do not invent a year rate from one January. Until six closed
+    # months exist we report the actual window, not ×12, and the UI
+    # must not quote it as ROA.
+    earnings_ready = n >= 6
+    if n == 0:
+        scale = 1.0
+        ni_ann = 0
+    elif n < 6:
+        scale = 1.0
+        ni_ann = ni_12
+    else:
+        scale = 12 / n
+        ni_ann = int(ni_12 * scale)
 
     agg = {}
     for m in last12:
@@ -188,8 +197,8 @@ def compute_metrics(state):
                       + ledger["balances"]["1100"] + ledger["balances"]["1010"])
     nim = (int_inc - int_exp) / max(1, earning_assets)
     eff = opex / max(1, (int_inc - int_exp) + fee_inc)
-    roa = ni_ann / max(1, assets)
-    roe = ni_ann / max(1, equity)
+    roa = (ni_ann / max(1, assets)) if earnings_ready else None
+    roe = (ni_ann / max(1, equity)) if earnings_ready else None
     ratios = capital_ratios(state)
     lr, liquid = liquidity_ratio(state)
     tbv = equity - ledger["balances"]["1600"]
@@ -198,7 +207,8 @@ def compute_metrics(state):
         "assets": assets, "equity": equity, "deposits": deposits, "loans": loans,
         "net_income_ttm": ni_ann,
         "nim": round(nim, 5), "efficiency": round(eff, 4),
-        "roa": round(roa, 5), "roe": round(roe, 5),
+        "roa": None if roa is None else round(roa, 5),
+        "roe": None if roe is None else round(roe, 5),
         "cost_of_funds": round(cost_of_deposits(state), 5),
         "yield_loans": round(yield_on_loans(bank["loans"]), 5),
         "npa_ratio": round((npl + oreo) / max(1, assets), 5),
@@ -212,9 +222,11 @@ def compute_metrics(state):
         "shares": bank["shares"],
         "partial_window": n < 6,
         "window_months": n,
+        "earnings_ready": earnings_ready,
     }
-    bank["roa_ttm"] = roa
-    bank["roe_ttm"] = roe
+    if earnings_ready:
+        bank["roa_ttm"] = roa
+        bank["roe_ttm"] = roe
     return m
 
 

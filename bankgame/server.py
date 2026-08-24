@@ -123,6 +123,8 @@ class Game:
                 "products_enabled": bank["products_enabled"],
                 "npl_balance": LN.npl_balance(bank["loans"]),
                 "stats": bank["loans"]["stats"],
+                "mortgage_preview": LN.mortgage_sale_preview(s),
+                "relationships": bank["loans"].get("relationships", [])[-20:],
             }
 
         if name == "deposits":
@@ -258,6 +260,8 @@ class Game:
                     "housing": r["housing_index"],
                     "my_deposits": my_dep,
                     "my_share": my_dep / max(1, r["deposit_pool"]),
+                    "share_ceiling": DEP.size_share_cap(s, mid),
+                    "ceiling_25m": DEP.size_share_cap(s, mid, 25_000_000_00),
                     "my_branches": len([b for b in bank["ops"]["branches"]
                                         if b["market"] == mid and b["open"]]),
                     "brand": bank["ops"]["brand"].get(mid, 0),

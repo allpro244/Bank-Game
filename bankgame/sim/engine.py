@@ -52,6 +52,80 @@ def _next_business_day(d):
     return nxt
 
 
+def served_markets(state):
+    """Markets where we have deposits, loans, or an open branch."""
+    bank = state["bank"]
+    mids = set()
+    for b in bank["ops"]["branches"]:
+        if b.get("open"):
+            mids.add(b["market"])
+    for mid, pools in bank["deposits"]["pools"].items():
+        if any((pools.get(p) or {}).get("balance", 0) > 0 for p in pools):
+            mids.add(mid)
+    for p in bank["loans"]["pools"]:
+        if p.get("balance", 0) > 0:
+            mids.add(p["market"])
+    for l in bank["loans"]["large"]:
+        if l.get("status") not in ("paid", "defaulted") and l.get("balance", 0) > 0:
+            mids.add(l["market"])
+    return mids
+
+
+def _inbox_worthy(state, ev):
+    """News is signal: local shocks only if we serve the town; national
+    headlines are capped separately."""
+    et = ev.get("type")
+    rid = ev.get("region")
+    if et in ("region_shock", "region_shock_end"):
+        return rid in served_markets(state)
+    return True
+
+
+def _national_headline(state, prev):
+    """At most one national wire a month, and only if something moved."""
+    econ = state["economy"]
+    era = (state.get("meta") or {}).get("era", "sandbox")
+    from . import goals as GOALS
+    when = GOALS.display_date(state)
+
+    if econ.get("in_bust", 0) > 0 and prev.get("in_bust", 0) == 0:
+        return {"type": "national", "blocking": False,
+                "title": "Credit crunch — %s" % when,
+                "text": ("Wholesale markets just seized up. Credit stress is "
+                         "%.0f%%. Construction and CRE will feel it first; "
+                         "uninsured depositors will read the papers."
+                         % (econ["credit_stress"] * 100))}
+    if econ["recession"] and not prev.get("recession"):
+        return {"type": "national", "blocking": False,
+                "title": "Recession — %s" % when,
+                "text": ("The expansion ended. Unemployment is %.1f%% and the "
+                         "output gap is %.1f. Loan demand will shrink; watch "
+                         "the vintages you wrote in the last two years."
+                         % (econ["unemployment"], econ["output_gap"]))}
+    move = econ["fed_funds"] - prev.get("fed_funds", econ["fed_funds"])
+    if abs(move) >= 0.005:
+        direction = "hiked" if move > 0 else "cut"
+        extra = ""
+        if era == "historical":
+            year = int(state["time"]["date"][:4])
+            if year >= 2022 and move > 0:
+                extra = " Duration on the bond book just got more expensive."
+            elif 2007 <= year <= 2009 and move < 0:
+                extra = " This is crisis-fighting, not a gift."
+        return {"type": "national", "blocking": False,
+                "title": "The Fed %s %dbp — %s" % (direction, int(round(abs(move) * 10000)), when),
+                "text": ("Fed funds is now %.2f%%.%s Deposit betas and loan "
+                         "repricing will follow at their own speeds."
+                         % (econ["fed_funds"] * 100, extra))}
+    if econ["credit_stress"] - prev.get("credit_stress", 0) >= 0.12:
+        return {"type": "national", "blocking": False,
+                "title": "Credit stress jumped — %s" % when,
+                "text": ("Stress is %.0f%%. Charge-offs lag this number by "
+                         "months. Tighten construction and CRE before the "
+                         "exam, not after." % (econ["credit_stress"] * 100))}
+    return None
+
+
 def push_event(state, ev):
     ev = dict(ev)
     ev["id"] = state["events"]["next_id"]
@@ -117,9 +191,29 @@ def _process_month_boundary(state, prev_date):
     month_label = prev_date.isoformat()[:7]
     quarter_end = prev_date.month in (3, 6, 9, 12)
 
-    economy.step_month(state["economy"], _rng(state, "econ"))
+    prev_econ = {
+        "fed_funds": state["economy"]["fed_funds"],
+        "recession": state["economy"]["recession"],
+        "credit_stress": state["economy"]["credit_stress"],
+        "in_bust": state["economy"].get("in_bust", 0),
+    }
+    era = (state.get("meta") or {}).get("era", "sandbox")
+    economy.step_month(state["economy"], _rng(state, "econ"),
+                       date=state["time"]["date"], era=era)
+    national_used = False
+    wire = _national_headline(state, prev_econ)
+    if wire:
+        raised.append(push_event(state, wire))
+        national_used = True
     for ev in regions.step_month(state["regions"], state["economy"], _rng(state, "region")):
-        raised.append(push_event(state, ev))
+        if not _inbox_worthy(state, ev):
+            continue
+        if ev.get("type") in ("region_shock", "region_shock_end"):
+            raised.append(push_event(state, ev))
+            continue
+        if not national_used:
+            raised.append(push_event(state, ev))
+            national_used = True
     for ev in competitors.step_month(state, _rng(state, "comp")):
         raised.append(push_event(state, ev))
 
@@ -650,15 +744,15 @@ def perform_action(state, action, payload):
             raise ActionError("%s above maximum" % key)
         return v
 
-    if action == "approve_loan" or action == "decline_loan":
+    if action in ("approve_loan", "decline_loan", "counter_loan", "participate_loan"):
         app_id = _num("app_id")
         q = bank["loans"]["queue"]
         app = next((a for a in q if a["id"] == app_id), None)
         if app is None:
             raise ActionError("application not found (may have expired)")
         q.remove(app)
+        from .funding import ensure_cash
         if action == "approve_loan":
-            from .funding import ensure_cash
             if ensure_cash(state, app["amount"]) < app["amount"]:
                 q.append(app)
                 raise ActionError("not enough liquidity to fund this loan")
@@ -666,8 +760,36 @@ def perform_action(state, action, payload):
             bank["loans"]["stats"]["approved_apps"] += 1
             return {"message": "Funded %s for $%s." % (app["name"],
                                                        f"{app['amount'] // 100:,}")}
-        bank["loans"]["stats"]["declined_apps"] += 1
-        return {"message": "Declined %s." % app["name"]}
+        if action == "decline_loan":
+            loans.decline_application(state, app)
+            bank["loans"]["stats"]["declined_apps"] += 1
+            return {"message": "Declined %s." % app["name"]}
+        if action == "counter_loan":
+            extra_bp = int(p.get("extra_bp", 100) or 100)
+            hold_frac = float(p.get("hold_frac", 0.70) or 0.70)
+            terms = loans.counter_terms(app, extra_bp=extra_bp, hold_frac=hold_frac)
+            if ensure_cash(state, terms["amount"]) < terms["amount"]:
+                q.append(app)
+                raise ActionError("not enough liquidity to fund the countered hold")
+            res = loans.counter_application(state, app, _rng(state, "credit"),
+                                            extra_bp=extra_bp, hold_frac=hold_frac)
+            if res["accepted"]:
+                bank["loans"]["stats"]["countered_apps"] = \
+                    bank["loans"]["stats"].get("countered_apps", 0) + 1
+                bank["loans"]["stats"]["approved_apps"] += 1
+            else:
+                bank["loans"]["stats"]["declined_apps"] += 1
+            return {"message": res["message"], "accepted": res["accepted"]}
+        hold_frac = float(p.get("hold_frac", 0.40) or 0.40)
+        hold, _sold = loans.participate_hold(app, hold_frac)
+        if ensure_cash(state, hold) < hold:
+            q.append(app)
+            raise ActionError("not enough liquidity to fund even a participation hold")
+        res = loans.participate_application(state, app, hold_frac=hold_frac)
+        bank["loans"]["stats"]["participated_apps"] = \
+            bank["loans"]["stats"].get("participated_apps", 0) + 1
+        bank["loans"]["stats"]["approved_apps"] += 1
+        return {"message": res["message"], "hold": res["hold"], "sold": res["sold"]}
 
     if action == "buy_security":
         res = securities.buy(state, p.get("type"), float(_num("tenor", 0.25, 30)),

@@ -50,6 +50,13 @@ def gauges(state):
             "detail": "The first real scorecard prints when January closes. "
                       "Until then there is no return-on-assets number — anyone "
                       "quoting one is guessing."})
+    elif not m.get("earnings_ready") or m.get("roa") is None:
+        out.append({
+            "key": "earnings", "label": "Earnings", "status": "y",
+            "head": "Too early for a year rate", "tab": "reports",
+            "detail": "A month is not a year. We will quote return on assets "
+                      "after six closed months — healthy banks earn 0.9–1.3%. "
+                      "Anyone annualizing January is guessing."})
     else:
         roa = m.get("roa", 0.0)
         eff = m.get("efficiency", 0.6)
@@ -151,7 +158,9 @@ def gauges(state):
     elif ratio < 0.30:
         st, head = "y", "Paper losses growing"
     else:
-        st, head = "r", "The SVB trap"
+        from . import goals as GOALS
+        st, head = "r", ("The SVB trap" if GOALS.allow_svb_name(state)
+                         else "The duration trap")
     out.append({
         "key": "raterisk", "label": "Rate risk", "status": st, "head": head,
         "tab": "treasury",
@@ -407,8 +416,9 @@ def _r_late_cycle(state):
         "default in the bust. Tightening costs volume today and saves your "
         "bank in two years." % (econ["credit_boom"], ", ".join(loose)),
         "Every loan pool remembers the underwriting standards in force when "
-        "it was written ('vintage quality'). 2006 vintages ruined banks in "
-        "2008. The boom index is on the Markets tab charts.",
+        "it was written ('vintage quality'). Loose vintages from the last "
+        "boom are the ones that break you in the bust. The boom index is "
+        "on the Markets tab charts.",
         "lending",
         [_plan("Tighten %s to 'Tight'" % ", ".join(loose), steps)])
 
@@ -532,8 +542,11 @@ def _r_hoarding(state):
         return None
     ea = m["equity"] / max(1, m["assets"])
     payout = bank["policies"]["dividend_payout"]
+    roe = m.get("roe")
+    if roe is None:
+        return None
     if ea < 0.16 or payout > 40 or reg["pca"] != "well" or \
-            reg["camels"]["composite"] > 2 or m.get("roe", 0) > 0.10:
+            reg["camels"]["composite"] > 2 or roe > 0.10:
         return None
     return _card(
         "hoarding", 0, "You're sitting on a pile of idle capital",
@@ -546,6 +559,31 @@ def _r_hoarding(state):
         "sheet with no plan is a savings account with overhead.",
         "treasury",
         [_set("Raise dividend payout to 50%", "policies.dividend_payout", 50)])
+
+
+def _r_sell_mortgages(state):
+    m = state["metrics"][-1] if state["metrics"] else None
+    if m is None or m.get("loan_to_deposit", 0) < 0.98:
+        return None
+    cfg = state["bank"]["loans"]
+    if cfg.get("mortgage_sale_frac", 0) >= 0.40:
+        return None
+    prev = LN.mortgage_sale_preview(state, 0.50)
+    if prev["mortgage_balance"] < 800_000_00 and prev["est_month_orig"] < 80_000_00:
+        return None
+    return _card(
+        "sell_mortgages", 1, "Sell more of the new mortgages",
+        "Loans are %.0f%% of deposits and the mortgage book is still growing "
+        "on your balance sheet. Selling half of new production turns about "
+        "%s a month into cash (plus a ~%s gain) instead of a 30-year asset. "
+        "You give up the interest. Raise the secondary-sale slider on Lending "
+        "when originations are outrunning deposits."
+        % (m["loan_to_deposit"] * 100, _fm(prev["sold"]), _fm(prev["gain"])),
+        "Fannie and Freddie buy conforming 30-year loans. You keep a small "
+        "gain and the cash; they keep the duration. The lever is already on "
+        "the Lending tab — this card just points at it.",
+        "lending",
+        [_set("Sell 50% of new mortgages", "loans.mortgage_sale_frac", 0.50)])
 
 
 def _r_funding_stretch(state):
@@ -616,7 +654,7 @@ def _r_exam_prep(state):
 
 _RULES = [
     _r_run_defense, _r_capital_repair, _r_rate_risk, _r_bsa_weak,
-    _r_deposit_lag, _r_funding_stretch, _r_late_cycle, _r_recession_cre,
+    _r_deposit_lag, _r_funding_stretch, _r_sell_mortgages, _r_late_cycle, _r_recession_cre,
     _r_hire_lender, _r_excess_cash, _r_uninsured_watch, _r_exam_prep,
     _r_fraud_weak, _r_core_old, _r_brand_decay, _r_hoarding,
 ]
@@ -647,9 +685,9 @@ def tutorial(state):
                  or "deposits" in acked, "tab": "deposits"},
         {"id": "memo", "title": "Decide a loan yourself",
          "text": "Big loan requests come to your desk with a credit memo — "
-                 "borrower, coverage ratio, collateral, an analyst's note. Read "
-                 "one and approve or decline it. (They appear in the inbox below "
-                 "and on the Lending tab; one shows up most months.)",
+                 "borrower, coverage ratio, collateral, an analyst's note. "
+                 "Approve, decline, counter (better rate / smaller hold), or "
+                 "participate a piece if you cannot fund the whole thing.",
          "done": (stats["approved_apps"] + stats["declined_apps"]) > 0
                  or "memo" in acked, "tab": "lending"},
         {"id": "bonds", "title": "Put idle cash to work",

@@ -255,7 +255,7 @@ def monthly_opex(state, rng):
         sal_total += int(s["count"] * s["salary"] * ops["salary_multiplier"]
                          * (1 + 0.06 * (s["skill"] - 2)) / 12)
     # benefits load
-    sal_total = int(sal_total * 1.28)
+    sal_total = int(sal_total * 1.32)
     if sal_total > 0:
         L.post(bank["ledger"], date, "Payroll and benefits",
                [["5100", sal_total, 0], ["1000", 0, sal_total]], tag="ops")
@@ -272,14 +272,15 @@ def monthly_opex(state, rng):
                [["5110", dep, 0], ["1500", 0, dep]], tag="ops")
 
     assets = max(bank["cached_assets"], 20_000_000_00)
-    tech = int(assets * 0.0011 / 12) + ops["cyber_spend"] \
+    tech = int(assets * 0.0020 / 12) + ops["cyber_spend"] \
         + int(ops["digital_level"] * 25_000_00) + ops["audit_spend"]
     L.post(bank["ledger"], date, "Technology, data processing, audit",
            [["5120", tech, 0], ["1000", 0, tech]], tag="ops")
 
     # everything else it takes to run a bank: insurance, legal, supplies,
-    # exams, professional fees, franchise taxes
-    other = int(assets * 0.0035 / 12) + 4_000_00
+    # exams, professional fees, franchise taxes. Sized so a passive
+    # community book lands near a real 1% ROA, not a 2.5% printer.
+    other = int(assets * 0.0075 / 12) + 8_000_00
     L.post(bank["ledger"], date, "Other operating expense",
            [["5170", other, 0], ["1000", 0, other]], tag="ops")
 
