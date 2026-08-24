@@ -67,7 +67,11 @@ class TestMarkets(unittest.TestCase):
         nyc = OPS.preview_branch(state, "nyc")
         verd = OPS.preview_branch(state, "verhalen")
         self.assertGreater(nyc["cost"], verd["cost"])
-        self.assertIn(nyc["verdict"], ("lethal", "stretch", "cannot_fund"))
+        # After A1 the gather is size-capped, so NYC is expensive — not a
+        # $900M seizure. Year-1 deposits stay a rounding error vs the pool.
+        self.assertLess(nyc["year1_gather"], nyc["pool"] * 0.001)
+        broke = new_game("Broke", seed=4)
+        self.assertEqual(OPS.preview_branch(broke, "nyc")["verdict"], "cannot_fund")
 
 
 if __name__ == "__main__":

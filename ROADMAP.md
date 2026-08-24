@@ -730,10 +730,10 @@ loses to an open A/B item.
 
 - [x] Playtest and this plan
 - [x] Phase A (A1 share, A2 preview, A3 M&A size, A4 overnight ask, A5 throttle)
-- [x] Phase B (B1 gauges, B2 title door, B3 owner labels, B4 inbox clock, B5 first credit, B6 shortcuts, B7 exam pill)
+- [x] Phase B (B1 gauges, B2 title Continue + no auto-load, B3 owner labels on bar/peers/exam, B4 inbox clock, B5 seeded first credit, B6 shortcuts, B7 exam pill). Save-row year/CAMELS and welcome-must-click-a-gauge still open.
 - [x] Phase C (C1 goto actions, C2 hire-lender gate, C3 toast what happened)
 - [ ] Phase D
 - [ ] Phase E
 - [ ] Phase F
-- [ ] Phase G (G2 partial-window flag only; G1 bands still open)
+- [ ] Phase G (G2 partial-window flag only; G1 bands still open — benign ROA is still ~2.5%)
 - [ ] Phase H (optional)
