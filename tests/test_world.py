@@ -51,7 +51,10 @@ class TestWorld(unittest.TestCase):
         self.assertTrue(goals.allow_svb_name(state))
         # Nudge pulls 2008 toward a bust, not a boom
         e = economy.new_economy(R.Rng(R.make_streams(1, ["econ"])["econ"]))
-        economy._nudge_historical(e, "2008-10-01")
+        before = e["credit_stress"]
+        for _ in range(8):
+            economy._nudge_historical(e, "2008-10-01")
+        self.assertGreater(e["credit_stress"], before)
         self.assertGreater(e["credit_stress"], 0.25)
 
     def test_25m_ceiling_is_tiny_in_dallas(self):
