@@ -52,6 +52,23 @@ cannot break because of a dependency.
 
 ## Playing the game
 
+- **Start at Your Desk.** The default screen is six plain-English health
+  lights (earnings, capital, liquidity, loans, regulators, rate risk —
+  each with your actual numbers and what "good" looks like), a guided
+  first-year tour, advisor cards ("your lenders are maxed out — hire one
+  for ~$98k/yr? **[Do it]**"), and an inbox of decisions waiting on you.
+  Every advisor "Do it" button just sets a lever you could set by hand,
+  and "Show me why" teaches you the screen behind it.
+- **Two views, one game.** The ⇄ toggle at the bottom of the sidebar
+  switches between *Owner view* (plain language — "Lending margin",
+  "Paper losses on bonds", "Regulator report card") and *Banker view*
+  (NIM, AOCI, CAMELS). Hover any dotted-underlined term for a one-line
+  explanation, or open the 📖 Glossary. Nothing about the simulation
+  changes between views.
+- **Changes preview before they apply.** Type a new deposit offset or
+  loan spread and a line appears estimating what it will do ("balances
+  drift toward +89% of today's target; interest cost +$34K/yr") before
+  you commit it.
 - **Advance time** with the +1 Day / Week / Month / Quarter buttons (or
   keyboard: space = day, w = week, m = month, q = quarter). Events that
   need a decision stop the clock and pop a modal.

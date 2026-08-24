@@ -58,6 +58,8 @@ def new_game(name="First National Bank of Caprock", seed=12345):
 
     _seed_balance_sheet(state)
     _seed_operations(state)
+    from . import advisor
+    advisor.ensure(state)
     bank["cached_assets"] = L.total_assets(bank["ledger"])
     from .regulation import capital_ratios, pca_category
     r = capital_ratios(state)

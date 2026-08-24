@@ -717,6 +717,21 @@ def perform_action(state, action, payload):
             pend.remove(ev)
         return {"message": "ok"}
 
+    if action == "advisor_dismiss":
+        from . import advisor
+        advisor.dismiss(state, str(p.get("card_id", "")))
+        return {"message": "ok"}
+
+    if action == "tutorial_ack":
+        from . import advisor
+        advisor.ack_step(state, str(p.get("step_id", "")))
+        return {"message": "ok"}
+
+    if action == "tutorial_off":
+        from . import advisor
+        advisor.tutorial_off(state)
+        return {"message": "Tour dismissed. It won't come back."}
+
     raise ActionError("unknown action: %s" % action)
 
 

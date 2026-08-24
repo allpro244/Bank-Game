@@ -1,14 +1,111 @@
 /* Bank Game UI. Vanilla JS, talks to the local JSON API. */
 
+let MODE = localStorage.getItem('bg_mode') || 'owner';   // 'owner' | 'banker'
 let SUM = null;          // latest /api/summary
-let TAB = 'dashboard';
+let TAB = MODE === 'owner' ? 'desk' : 'dashboard';
 let SEC = {};            // section cache
 let BUSY = false;
+
+/* ---------------- glossary & owner-mode labels ----------------
+   Every entry: b = banker label, o = plain-English label, g = tooltip.
+   Owner mode swaps labels; both modes get the tooltip. Same game either way. */
+const DICT = {
+  nim:  { b: 'NIM', o: 'Lending margin',
+    g: 'Net interest margin: what your assets earn minus what your funding costs, as a % of earning assets. The core of bank profit. 3.5-4% is healthy.' },
+  roa:  { b: 'ROA / ROE', o: 'Return on assets / equity',
+    g: 'ROA: yearly profit as a % of everything the bank owns (0.9-1.3% is good). ROE: profit as a % of YOUR money in the bank — the owner’s score (10%+ is good).' },
+  eff:  { b: 'Efficiency', o: 'Cost per $1 of revenue',
+    g: 'Operating costs divided by revenue. 60% means you spend 60 cents to make a dollar. LOWER is better; under 60% is strong, over 80% is a problem.' },
+  npa:  { b: 'NPAs', o: 'Bad loans',
+    g: 'Nonperforming assets: loans no longer paying, plus foreclosed property, as a % of assets. Under 1% is clean; over 3% brings examiners.' },
+  cet1: { b: 'CET1', o: 'Core capital',
+    g: 'Your highest-quality capital (common equity) as a % of risk-weighted assets. The loss cushion regulators watch hardest. 6.5%+ = "well-capitalized"; 9%+ is comfortable.' },
+  leverage: { b: 'Leverage ratio', o: 'Capital vs total assets',
+    g: 'Core capital as a % of TOTAL assets, ignoring risk weights. A blunt backstop: 5%+ required to be well-capitalized.' },
+  aoci: { b: 'AOCI', o: 'Paper gain/loss on bonds',
+    g: 'Unrealized gains/losses on sellable (AFS) bonds, flowing straight through your equity as rates move. Paper — until a crisis forces you to sell.' },
+  htm:  { b: 'HTM', o: 'Locked-away bonds',
+    g: 'Held-to-maturity: bonds carried at cost so paper losses stay hidden from equity. Sell even one and accounting rules force the WHOLE book marked to market at once (the SVB trap).' },
+  afs:  { b: 'AFS', o: 'Sellable bonds',
+    g: 'Available-for-sale: bonds marked to market value daily, with gains/losses hitting equity (AOCI). Flexible, but your equity breathes with rates.' },
+  camels: { b: 'CAMELS', o: 'Regulator report card',
+    g: 'Exam rating 1 (best) to 5 (about to fail) across Capital, Asset quality, Management, Earnings, Liquidity, Sensitivity to rates. 3 = watch list. 4 = forced restrictions.' },
+  pca:  { b: 'PCA', o: 'Capital status',
+    g: 'Prompt Corrective Action: the regulatory ladder from "well-capitalized" down to seizure. Each rung down removes powers (brokered deposits, dividends, growth).' },
+  ldr:  { b: 'LDR', o: 'Loans vs deposits',
+    g: 'Loans divided by deposits. Around 0.8-1.0 is balanced; above ~1.05 you’re funding loans with borrowed money.' },
+  cof:  { b: 'CoF', o: 'Cost of funding',
+    g: 'The average interest rate you pay across all deposits. Keeping this low while keeping depositors is the deposit game.' },
+  uninsured: { b: 'Uninsured', o: 'Big deposits (uninsured)',
+    g: 'Share of deposits above the $250,000 FDIC insurance limit. Insured money sleeps through a crisis; uninsured money runs at the first bad headline.' },
+  tbv:  { b: 'TBV/sh', o: 'Book value per share',
+    g: 'Tangible book value per share: hard net worth (excluding goodwill) divided by shares. The bedrock valuation of a bank.' },
+  reserves: { b: 'Reserves', o: 'Loss reserve',
+    g: 'The allowance for credit losses: money already set aside (through past earnings) for loans expected to go bad. Recomputed quarterly under CECL rules.' },
+  duration: { b: 'Duration', o: 'Rate sensitivity (years)',
+    g: 'How hard bond prices move when rates move: a duration of 5 means roughly -5% price for +1% in rates. Longer duration = more yield, more pain when rates rise.' },
+  fhlb: { b: 'FHLB', o: 'FHLB (backup borrowing)',
+    g: 'The Federal Home Loan Bank: a lender banks can borrow from against loan/bond collateral. Respectable and fast — your first line of backup liquidity.' },
+  dw:   { b: 'Discount window', o: 'Fed emergency loans',
+    g: 'Borrowing from the Federal Reserve itself. Always available, slightly pricey, and habitual use tells examiners you have a funding problem.' },
+  brokered: { b: 'Brokered', o: 'Bought deposits',
+    g: 'Deposits purchased through brokers rather than earned from customers. Instant funding at a premium price — banned if your capital slips below well-capitalized.' },
+  spread: { b: 'Spread bp', o: 'Your price vs market (bp)',
+    g: 'Basis points (1bp = 0.01%) versus the going market rate. Negative = undercut competitors to win volume with thinner margins; positive = premium pricing.' },
+  standards: { b: 'Standards', o: 'How picky you are',
+    g: 'Underwriting standards. Loose books more volume from weaker borrowers — and every loan pool permanently remembers the standards it was written under when the next recession arrives.' },
+  tier: { b: 'Tier', o: 'Borrower grade',
+    g: 'Credit grade: A = strong borrower, low loss risk; B = acceptable; C = marginal, priced up for risk (about 6x the default rate of an A).' },
+  dscr: { b: 'DSCR', o: 'Payment coverage',
+    g: 'Debt service coverage ratio: borrower cash flow vs loan payments. 1.3x means 30% cushion. Below 1.2x is thin; below 1.0x they can’t afford the loan.' },
+  ltv:  { b: 'LTV', o: 'Loan vs collateral',
+    g: 'Loan-to-value: loan size vs collateral worth. 70% LTV means the collateral covers you even if it loses 30% of its value in foreclosure.' },
+  oreo: { b: 'OREO', o: 'Foreclosed property',
+    g: 'Other Real Estate Owned: property you seized from defaulted borrowers. Costs money to hold, sells at a discount — get rid of it.' },
+  cra:  { b: 'CRA', o: 'Community lending grade',
+    g: 'Community Reinvestment Act rating: are you lending where you take deposits? A poor rating blocks regulators from approving your acquisitions.' },
+  bsa:  { b: 'BSA / AML', o: 'Anti-money-laundering',
+    g: 'Bank Secrecy Act program: know your customers, monitor transactions, file suspicious-activity reports. Chronic underinvestment ends in nine-figure fines.' },
+  cecl: { b: 'CECL', o: 'Expected-loss reserving',
+    g: 'Current Expected Credit Losses: each quarter you must reserve for the LIFETIME expected losses of every loan on day one — front-loading the pain of growth.' },
+  interchange: { b: 'Interchange', o: 'Card swipe income',
+    g: 'The slice of every debit-card purchase the bank keeps. Cut roughly in half by law (the Durbin amendment) once you cross $10B in assets.' },
+  liquidity: { b: 'Liquidity', o: 'Ready cash',
+    g: 'Cash plus sellable securities as a % of assets: what you could hand back to depositors tomorrow without borrowing. Under ~8% is living dangerously.' },
+};
+
+function dt(key, override) {
+  const e = DICT[key];
+  if (!e) return esc(override || key);
+  const label = override || (MODE === 'owner' ? e.o : e.b);
+  const tip = e.g + (MODE === 'owner' && e.b !== e.o ? ' (Bankers call this "' + e.b + '".)' : '');
+  return `<span class="term" title="${esc(tip)}">${esc(label)}</span>`;
+}
+
+function toggleMode() {
+  MODE = MODE === 'owner' ? 'banker' : 'owner';
+  localStorage.setItem('bg_mode', MODE);
+  toast(MODE === 'owner'
+    ? 'Owner view: plain language, Your Desk first. Same game underneath.'
+    : 'Banker view: full jargon, dense dashboard first.');
+  refresh();
+}
+
+function showGlossary() {
+  const body = Object.values(DICT)
+    .sort((a, b) => a.o.localeCompare(b.o))
+    .map(e => `${e.o}${e.b !== e.o ? '  ("' + e.b + '")' : ''}\n   ${e.g}`)
+    .join('\n\n');
+  showText('Glossary — banking, translated', esc(body));
+}
 
 /* ---------------- helpers ---------------- */
 const $ = id => document.getElementById(id);
 const esc = s => String(s == null ? '' : s)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+// JSON safe to embed inside a single-quoted HTML attribute
+const jattr = o => JSON.stringify(o).replace(/&/g, '\\u0026')
+  .replace(/'/g, '&#39;').replace(/</g, '\\u003c');
 
 function fm(cents) {           // full dollars with commas
   if (cents == null) return '—';
@@ -119,6 +216,7 @@ function renderTopbar() {
 }
 
 const TABS = [
+  ['desk', 'Your Desk'],
   ['dashboard', 'Dashboard'], ['lending', 'Lending'], ['deposits', 'Deposits'],
   ['treasury', 'Treasury'], ['ops', 'Operations'], ['risk', 'Risk & Reg'],
   ['markets', 'Markets'], ['reports', 'Reports'], ['ledger', 'Ledger'],
@@ -128,6 +226,8 @@ const TABS = [
 function renderNav() {
   const counts = SUM.counts || {};
   const badges = {
+    desk: (counts.loan_queue || 0) + (counts.fraud_cases || 0)
+          + (SUM.pending || []).length,
     lending: counts.loan_queue || 0,
     risk: counts.fraud_cases || 0,
     events: (SUM.pending || []).length,
@@ -135,7 +235,11 @@ function renderNav() {
   $('nav').innerHTML = TABS.map(([id, label]) =>
     `<div class="tab ${TAB === id ? 'active' : ''}" onclick="switchTab('${id}')">
        <span>${label}</span>${badges[id] ? `<span class="badge">${badges[id]}</span>` : ''}
-     </div>`).join('');
+     </div>`).join('') +
+    `<div style="flex:1;min-height:12px"></div>
+     <div class="tab" onclick="showGlossary()"><span>📖 Glossary</span></div>
+     <div class="tab" onclick="toggleMode()" title="Owner view: plain language. Banker view: full jargon. Same game.">
+       <span>⇄ ${MODE === 'owner' ? 'Owner view' : 'Banker view'}</span></div>`;
 }
 
 async function switchTab(id) {
@@ -153,7 +257,8 @@ async function renderTab() {
   const m = $('main');
   if (SUM.game_over) { renderGameOver(m); return; }
   try {
-    if (TAB === 'dashboard') await tabDashboard(m);
+    if (TAB === 'desk') await tabDesk(m);
+    else if (TAB === 'dashboard') await tabDashboard(m);
     else if (TAB === 'lending') await tabLending(m);
     else if (TAB === 'deposits') await tabDeposits(m);
     else if (TAB === 'treasury') await tabTreasury(m);
@@ -182,6 +287,119 @@ function renderGameOver(m) {
     </div>`;
 }
 
+/* ---------------- Your Desk ---------------- */
+async function tabDesk(m) {
+  const d = await section('desk');
+  const g = d.gauges;
+  const tut = d.tutorial;
+  const inbox = d.inbox;
+  const nothingPending = !inbox.events.length && !inbox.loans.length && !inbox.fraud.length;
+  const allGreen = g.every(x => x.status === 'g');
+
+  m.innerHTML = `
+    <h2>Your Desk <span class="sub">— what needs you, in plain English. Every light and card clicks through to the full detail.</span></h2>
+
+    <div class="gauges">
+      ${g.map(x => `
+        <div class="gauge ${x.status}" onclick="switchTab('${x.tab}')"
+             title="Click to open the full ${x.tab} view">
+          <div class="glabel">${esc(x.label)}</div>
+          <div class="ghead">${esc(x.head)}</div>
+          <div class="gdetail">${esc(x.detail)}</div>
+        </div>`).join('')}
+    </div>
+
+    ${tut.active ? renderTutorial(tut) : ''}
+
+    ${d.cards.length ? `<h3>From your advisors</h3>
+      <div class="advcards">${d.cards.map(renderAdvCard).join('')}</div>` :
+      (allGreen ? `<div class="panel" style="margin-top:10px"><span class="sub">
+        Your advisors have nothing urgent. All six lights are green — bank the
+        profits, or go make some trouble on the Lending and Markets tabs.</span></div>` : '')}
+
+    <h3>Inbox — decisions waiting on you</h3>
+    <div class="panel">
+      ${nothingPending ? '<span class="sub">Empty. Advance the clock and the world will bring you problems.</span>' : ''}
+      ${inbox.events.map(ev => `<div class="newsitem block">
+          <span class="nd">${esc(ev.date)}</span><b>${esc(ev.title)}</b>
+          <button class="small primary" onclick="openEvent(${ev.id})">Open</button>
+        </div>`).join('')}
+      ${inbox.loans.map(a => `<div class="newsitem">
+          <span class="nd">loan</span>${esc(a.name)} wants <b>${fm(a.amount)}</b>
+          (${esc(a.product.toUpperCase())}, grade ${a.tier}, ${a.days_left} days to answer)
+          <button class="small" onclick='showMemo(${jattr(a)})'>Read the memo</button>
+        </div>`).join('')}
+      ${inbox.fraud.map(c => `<div class="newsitem">
+          <span class="nd">fraud</span>Case #${c.id}: ${esc(c.kind.replace('_', ' '))} —
+          ${esc(c.name)} (${fm(c.amount)} at risk)
+          <button class="small primary" onclick="act('resolve_fraud_case',{case_id:${c.id},choice:'act'})">Act now</button>
+          <button class="small" onclick="act('resolve_fraud_case',{case_id:${c.id},choice:'monitor'})">Watch it</button>
+        </div>`).join('')}
+    </div>`;
+}
+
+function renderTutorial(tut) {
+  const next = tut.steps.find(s => !s.done);
+  return `<div class="panel tutorial">
+    <h3 style="margin-top:0">Your first year — a guided tour
+      <button class="small" style="float:right" onclick="act('tutorial_off',{})">Skip the tour</button></h3>
+    ${tut.steps.map(s => `
+      <div class="tutstep ${s.done ? 'done' : (next && s.id === next.id ? 'now' : '')}">
+        <span class="tutmark">${s.done ? '✓' : '○'}</span>
+        <div><b>${esc(s.title)}</b>
+          ${(!s.done && next && s.id === next.id) ? `<div class="sub">${esc(s.text)}</div>
+            <div style="margin-top:4px">
+              <button class="small primary" onclick="switchTab('${s.tab}')">Take me there</button>
+              ${s.id !== 'exam' ? `<button class="small" onclick="act('tutorial_ack',{step_id:'${s.id}'})">Mark done</button>` : ''}
+            </div>` : ''}
+        </div>
+      </div>`).join('')}
+  </div>`;
+}
+
+function renderAdvCard(c) {
+  const btns = c.actions.map((a, i) =>
+    `<button class="primary small" onclick='doSteps(${jattr(c.id)}, ${jattr(a.steps)})'>${esc(a.label)}</button>`
+  ).join(' ');
+  return `<div class="advcard sev${c.sev}">
+    <div class="advtitle">${esc(c.title)}</div>
+    <div class="advtext">${esc(c.text)}</div>
+    <div class="btnrow" style="margin-top:8px">
+      ${btns}
+      <button class="small" onclick='showWhy(${jattr(c)})'>Show me why</button>
+      <button class="small" onclick="dismissCard('${c.id}')">Ignore</button>
+    </div>
+  </div>`;
+}
+
+function showWhy(c) {
+  showText(c.title, esc(c.learn),
+    [['Take me to the ' + c.tab + ' tab', `closeText();switchTab('${c.tab}')`, 'primary']]);
+}
+
+async function dismissCard(id) {
+  try {
+    await api('/api/action', { action: 'advisor_dismiss', payload: { card_id: id } });
+    toast('Noted. Your advisor will drop it for a while.');
+    await refresh();
+  } catch (e) { toast(String(e), true); }
+}
+
+async function doSteps(cardId, steps) {
+  if (BUSY) return;
+  BUSY = true;
+  try {
+    for (const s of steps) {
+      if (s.kind === 'set') await api('/api/set', { path: s.path, value: s.value });
+      else await api('/api/action', { action: s.action, payload: s.payload });
+    }
+    await api('/api/action', { action: 'advisor_dismiss', payload: { card_id: cardId } });
+    toast('Done. (Everything the advisor did, you could have set by hand.)');
+  } catch (e) { toast(String(e), true); }
+  finally { BUSY = false; }
+  await refresh();
+}
+
 /* ---------------- Dashboard ---------------- */
 async function tabDashboard(m) {
   const b = SUM.bank, mt = SUM.metrics || {}, e = SUM.econ, reg = SUM.regulation;
@@ -202,16 +420,16 @@ async function tabDashboard(m) {
     ${warn}
     <div class="cards">
       ${card('Total assets', fmc(b.assets))}
-      ${card('Loans', fmc(b.loans), 'LDR ' + (mt.loan_to_deposit != null ? mt.loan_to_deposit.toFixed(2) : '—'))}
-      ${card('Deposits', fmc(b.deposits), 'uninsured ' + pct(mt.uninsured_pct, 0))}
-      ${card('Equity', fmc(b.equity), 'TBV/sh ' + fm(mt.tbv_per_share))}
+      ${card('Loans', fmc(b.loans), dt('ldr') + ' ' + (mt.loan_to_deposit != null ? mt.loan_to_deposit.toFixed(2) : '—'))}
+      ${card('Deposits', fmc(b.deposits), dt('uninsured') + ' ' + pct(mt.uninsured_pct, 0))}
+      ${card('Equity', fmc(b.equity), dt('tbv') + ' ' + fm(mt.tbv_per_share))}
       ${card('Net income (TTM)', fmc(mt.net_income_ttm), 'MTD ' + fmc(b.ni_mtd), cls(mt.net_income_ttm))}
-      ${card('ROA / ROE', pct(mt.roa) + ' / ' + pct(mt.roe, 1))}
-      ${card('NIM', pct(mt.nim), 'CoF ' + pct(mt.cost_of_funds))}
-      ${card('Efficiency', pct(mt.efficiency, 0))}
-      ${card('NPAs', pct(mt.npa_ratio), 'reserves/loans ' + pct(mt.reserve_coverage))}
-      ${card('CET1', pct(mt.cet1_ratio, 1), 'leverage ' + pct(mt.leverage_ratio, 1))}
-      ${card('Liquidity', pct(mt.liquidity_ratio, 1), 'of assets')}
+      ${card(dt('roa'), pct(mt.roa) + ' / ' + pct(mt.roe, 1), peerNote('roa', mt.roa))}
+      ${card(dt('nim'), pct(mt.nim), peerNote('nim', mt.nim) + ' · ' + dt('cof') + ' ' + pct(mt.cost_of_funds))}
+      ${card(dt('eff'), pct(mt.efficiency, 0), peerNote('efficiency', mt.efficiency, true))}
+      ${card(dt('npa'), pct(mt.npa_ratio), peerNote('npa_ratio', mt.npa_ratio, true) + ' · ' + dt('reserves') + ' ' + pct(mt.reserve_coverage))}
+      ${card(dt('cet1'), pct(mt.cet1_ratio, 1), dt('leverage') + ' ' + pct(mt.leverage_ratio, 1))}
+      ${card(dt('liquidity'), pct(mt.liquidity_ratio, 1), 'of assets · 8%+ is safe')}
       ${card('Fed funds', pct(e.fed_funds), '10y ' + pct(curveAt(e.curve, 10)))}
     </div>
     <div class="grid g3">
@@ -254,6 +472,13 @@ function card(k, v, d, extraCls) {
   return `<div class="card"><div class="k">${k}</div>
     <div class="v ${extraCls || ''}">${v}</div>${d ? `<div class="d">${d}</div>` : ''}</div>`;
 }
+
+function peerNote(key, mine, lowerBetter) {
+  const p = SUM && SUM.peer_avg;
+  if (!p || p[key] == null || mine == null) return '';
+  const better = lowerBetter ? mine <= p[key] : mine >= p[key];
+  return `<span class="${better ? 'pos' : 'warn'}" title="Average of the ${p.n} rival banks closest to your size${lowerBetter ? '. Lower is better.' : ''}">peers ~${pct(p[key], key === 'efficiency' ? 0 : 2)}</span>`;
+}
 function curveAt(curve, tenor) {
   const p = curve.find(c => c[0] === tenor);
   return p ? p[1] : null;
@@ -264,6 +489,61 @@ function newsList(log) {
        <span class="nd">${esc(ev.date)}</span>${esc(ev.title)}
        ${ev.text ? `<a onclick='showText(${JSON.stringify(esc(ev.title))}, ${JSON.stringify(esc(ev.text))})'> …more</a>` : ''}
      </div>`).join('') || '<span class="sub">Quiet so far.</span>';
+}
+
+/* ---------------- consequence previews ----------------
+   Live "what will this do" estimates, computed from the same constants
+   the engine uses (served in /api/summary so they can't drift). Shown
+   while you type, BEFORE the change applies. */
+function prevBox(id, text) {
+  const el = $(id);
+  if (el) el.innerHTML = text ? '≈ ' + text : '';
+}
+function ratioTxt(r) {
+  const p = (r - 1) * 100;
+  return (p >= 0 ? '+' : '') + p.toFixed(0) + '%';
+}
+function prevDep(product, val, cur, balance) {
+  const m = SUM.model, bp = parseInt(val);
+  if (isNaN(bp)) return prevBox('prev-deposits', '');
+  const ratio = Math.exp((m.dep_sens[product] || 0) * (bp - cur) / 100);
+  const cost = Math.round(balance * (bp - cur) / 10000);
+  prevBox('prev-deposits',
+    `${DEP_LABELS[product]} at ${bp >= 0 ? '+' : ''}${bp}bp: balances drift toward ` +
+    `${ratioTxt(ratio)} of today's target; interest cost ${cost >= 0 ? '+' : '−'}` +
+    `${fmc(Math.abs(cost))}/yr on current balances. Hot money (money market, short ` +
+    `CDs) moves in weeks; checking barely moves. Press Enter or click away to apply.`);
+}
+function prevSpread(product, val, cur) {
+  const m = SUM.model, bp = parseInt(val);
+  if (isNaN(bp)) return prevBox('prev-lending', '');
+  const vol = Math.exp(-m.loan_price_k * (bp - cur) / 100);
+  prevBox('prev-lending',
+    `${PRODUCT_LABELS[product]} at ${bp >= 0 ? '+' : ''}${bp}bp vs market: new-loan ` +
+    `volume ${ratioTxt(vol)}, and each new loan yields ${bp - cur >= 0 ? '+' : ''}` +
+    `${bp - cur}bp more than now. Loans already on the books keep their pricing. ` +
+    `Press Enter or click away to apply.`);
+}
+async function applyStd(product, v, cur) {
+  const m = SUM.model, t = parseInt(v);
+  const vol = m.tight_mult[t] / m.tight_mult[cur];
+  const q = m.quality[t] / m.quality[cur];
+  await setPol('loans.standards.' + product, t);
+  toast(`${PRODUCT_LABELS[product]} standards: new-loan volume ${ratioTxt(vol)} from here, ` +
+        `and future loss rates on loans written FROM NOW ON ${ratioTxt(q)}. ` +
+        `Loans already booked keep the standards they were written under.`);
+}
+function prevOD(val, cur, accounts) {
+  const fee = Math.round(parseFloat(val) * 100);
+  if (isNaN(fee)) return prevBox('prev-fees', '');
+  const dInc = Math.round(accounts * 0.055 * (fee - cur) * 12);
+  const drag = Math.max(0, (fee - 3000) / 1000 * 0.01);
+  const dragCur = Math.max(0, (cur - 3000) / 1000 * 0.01);
+  prevBox('prev-fees',
+    `Overdraft at $${(fee / 100).toFixed(0)}: fee income ${dInc >= 0 ? '+' : '−'}` +
+    `${fmc(Math.abs(dInc))}/yr at today's account count; customer-annoyance drag on ` +
+    `deposit growth ${pct(drag, 1)} (now ${pct(dragCur, 1)}). High fees also feed ` +
+    `examiner criticism. Press Enter to apply.`);
 }
 
 /* ---------------- Lending ---------------- */
@@ -292,17 +572,18 @@ async function tabLending(m) {
       <h3>Pricing & underwriting (by product)</h3>
       <div class="helptip">Spread: your pricing vs the market in basis points (negative = undercut to win volume).
       Standards: 0 = anything with a pulse … 4 = fortress. Limit: cap as % of total loans (0 = none).</div>
-      <table><tr><th>Product</th><th class="r">Mkt rate</th><th class="r">Spread bp</th>
-        <th class="r">Standards</th><th class="r">Limit %</th><th class="r">Balance</th>
-        <th class="r">30-89dpd</th><th class="r">NPL</th></tr>
+      <table><tr><th>Product</th><th class="r">Mkt rate</th><th class="r">${dt('spread')}</th>
+        <th class="r">${dt('standards')}</th><th class="r">Limit %</th><th class="r">Balance</th>
+        <th class="r">30-89dpd</th><th class="r">${dt('npa', MODE === 'owner' ? 'Not paying' : 'NPL')}</th></tr>
       ${prods.map(p => {
         const st = port[p] || { balance: 0, npl: 0, d3090: 0 };
         return `<tr>
           <td>${PRODUCT_LABELS[p]}</td>
           <td class="r">${pct(d.market_rates[p])}</td>
           <td class="r"><input type="number" step="5" id="sp-${p}" value="${d.spreads[p]}"
+               oninput="prevSpread('${p}', this.value, ${d.spreads[p]})"
                onchange="setPol('loans.spreads.${p}', parseInt(this.value))"></td>
-          <td class="r"><select onchange="setPol('loans.standards.${p}', parseInt(this.value))">
+          <td class="r"><select onchange="applyStd('${p}', this.value, ${d.standards[p]})">
             ${[0,1,2,3,4].map(t => `<option value="${t}" ${d.standards[p]===t?'selected':''}>${['Loose','Easy','Standard','Tight','Fortress'][t]}</option>`).join('')}
           </select></td>
           <td class="r"><input type="number" step="5" min="0" max="100" value="${d.limits[p]}"
@@ -313,6 +594,7 @@ async function tabLending(m) {
         </tr>`;
       }).join('')}
       </table>
+      <div class="prevbar" id="prev-lending"></div>
     </div>
     <div class="panel">
       <h3>Credit policy</h3>
@@ -342,7 +624,7 @@ async function tabLending(m) {
       ${d.queue.length ? `<table><tr><th>Borrower</th><th>Product</th><th class="r">Amount</th>
         <th class="r">Rate</th><th>Tier</th><th class="r">DSCR</th><th class="r">LTV</th>
         <th>Expires</th><th></th></tr>
-        ${d.queue.map(a => `<tr class="click" onclick='showMemo(${JSON.stringify(a)})'>
+        ${d.queue.map(a => `<tr class="click" onclick='showMemo(${jattr(a)})'>
           <td>${esc(a.name)}</td><td>${PRODUCT_LABELS[a.product] || a.product}</td>
           <td class="r">${fm(a.amount)}</td><td class="r">${pct(a.rate)}</td>
           <td>${a.tier}</td><td class="r">${a.dscr.toFixed(2)}x</td>
@@ -402,18 +684,21 @@ async function tabDeposits(m) {
       <div class="helptip">Your posted rate tracks the market; the offset is your stance.
         +50bp wins hot money (money market and CDs move fastest), -50bp fattens margin and bleeds balances.</div>
       <table><tr><th>Product</th><th class="r">You pay</th><th class="r">Market</th>
-        <th class="r">Offset bp</th><th class="r">Balance</th><th class="r">Accounts</th></tr>
+        <th class="r">${dt('spread', MODE === 'owner' ? 'Your stance (bp)' : 'Offset bp')}</th>
+        <th class="r">Balance</th><th class="r">Accounts</th></tr>
       ${Object.keys(DEP_LABELS).map(p => `<tr>
         <td>${DEP_LABELS[p]}</td>
         <td class="r"><b>${pct(d.effective_rates[p])}</b></td>
         <td class="r">${p === 'checking' ? '—' : pct(d.market_rates[p] ?? d.market_rates['savings'])}</td>
         <td class="r">${p === 'checking' ? '—' :
           `<input type="number" step="5" min="-300" max="300" value="${d.offsets_bp[p]}"
+            oninput="prevDep('${p}', this.value, ${d.offsets_bp[p]}, ${t[p]})"
             onchange="setPol('deposits.offsets_bp.${p}', parseInt(this.value))">`}</td>
         <td class="r">${fmc(t[p])}</td>
         <td class="r">${(sumAccounts(d.pools, p)).toLocaleString()}</td>
       </tr>`).join('')}
       </table>
+      <div class="prevbar" id="prev-deposits"></div>
       <div class="ctl" style="margin-top:6px"><label>CD promo bonus (bp on all CDs)</label>
         <input type="number" step="5" min="0" max="300" value="${Math.round(d.promo_cd_bonus * 10000)}"
           onchange="setPol('deposits.promo_cd_bonus', parseFloat(this.value)/10000)"></div>
@@ -426,9 +711,11 @@ async function tabDeposits(m) {
            ['safe_deposit_annual', 'Safe deposit (annual)']].map(([k, label]) => `<tr>
           <td>${label}</td>
           <td class="r"><input type="number" step="1" min="0" id="fee-${k}" value="${(d.fees[k] / 100).toFixed(2)}"
+            ${k === 'overdraft_fee' ? `oninput="prevOD(this.value, ${d.fees[k]}, ${sumAccounts(d.pools, 'checking') + sumAccounts(d.pools, 'checking_int')})"` : ''}
             onchange="setPol('deposits.fees.${k}', Math.round(parseFloat(this.value)*100))"></td>
         </tr>`).join('')}
       </table>
+      <div class="prevbar" id="prev-fees"></div>
       <div class="helptip">High overdraft fees print money until customers leave and examiners write you up.</div>
       <h3>Wholesale (brokered) deposits</h3>
       ${d.brokered.length ? `<table><tr><th class="r">Amount</th><th class="r">Rate</th><th class="r">Months left</th></tr>
@@ -467,11 +754,11 @@ async function tabTreasury(m) {
     <h2>Treasury — securities, funding, capital</h2>
     <div class="cards">
       ${card('Cash', fmc(d.cash), 'fed funds sold ' + fmc(d.fed_funds_sold))}
-      ${card('AFS portfolio', fmc(s.afs_mv), 'book ' + fmc(s.afs_book))}
-      ${card('HTM portfolio', fmc(s.htm_book), 'unrealized ' + fmc(s.htm_unrealized), cls(s.htm_unrealized))}
-      ${card('Portfolio yield', pct(s.yield), 'duration ' + s.duration + 'y')}
-      ${card('AOCI', fmc(d.aoci), 'marks through equity', cls(d.aoci))}
-      ${card('Liquidity ratio', pct(d.liquidity_ratio, 1))}
+      ${card(dt('afs', MODE === 'owner' ? 'Sellable bonds (AFS)' : 'AFS portfolio'), fmc(s.afs_mv), 'book ' + fmc(s.afs_book))}
+      ${card(dt('htm', MODE === 'owner' ? 'Locked bonds (HTM)' : 'HTM portfolio'), fmc(s.htm_book), 'unrealized ' + fmc(s.htm_unrealized), cls(s.htm_unrealized))}
+      ${card('Portfolio yield', pct(s.yield), dt('duration') + ' ' + s.duration + 'y')}
+      ${card(dt('aoci'), fmc(d.aoci), 'marks through equity', cls(d.aoci))}
+      ${card(dt('liquidity'), pct(d.liquidity_ratio, 1))}
       ${s.tainted ? card('HTM STATUS', 'TAINTED', 'no more HTM purchases', 'neg') : ''}
     </div>
     <div class="grid g2">
@@ -650,15 +937,15 @@ async function tabRisk(m) {
   m.innerHTML = `
     <h2>Risk & Regulation</h2>
     <div class="cards">
-      ${card('CET1 ratio', pct(c.cet1_ratio), 'well-cap needs 6.5%', c.cet1_ratio < 0.065 ? 'neg' : 'pos')}
+      ${card(dt('cet1'), pct(c.cet1_ratio), 'well-cap needs 6.5%', c.cet1_ratio < 0.065 ? 'neg' : 'pos')}
       ${card('Tier 1 / Total', pct(c.tier1_ratio, 1) + ' / ' + pct(c.total_ratio, 1))}
-      ${card('Leverage', pct(c.leverage_ratio), 'tangible equity ' + pct(c.tang_equity_ratio))}
-      ${card('PCA status', d.pca.toUpperCase(), '', d.pca === 'well' ? 'pos' : 'neg')}
-      ${card('CAMELS', String(camels.composite),
+      ${card(dt('leverage'), pct(c.leverage_ratio), 'tangible equity ' + pct(c.tang_equity_ratio))}
+      ${card(dt('pca'), d.pca.toUpperCase(), '', d.pca === 'well' ? 'pos' : 'neg')}
+      ${card(dt('camels'), String(camels.composite),
         `C${camels.C} A${camels.A} M${camels.M} E${camels.E} L${camels.L} S${camels.S}`,
         camels.composite <= 2 ? 'pos' : camels.composite === 3 ? 'warn' : 'neg')}
       ${card('Next exam', '~' + d.months_to_exam + ' mo')}
-      ${card('CRA rating', d.cra, '', d.cra === 'Needs to Improve' ? 'neg' : 'pos')}
+      ${card(dt('cra'), d.cra, '', d.cra === 'Needs to Improve' ? 'neg' : 'pos')}
     </div>
     ${d.orders.length ? `<div class="banner amber">Active enforcement: ${esc(d.orders.join(' · '))}</div>` : ''}
     ${d.thresholds.durbin ? '<div class="sub">Regulatory tier: ' +
@@ -1002,6 +1289,8 @@ async function showSaves() {
         <input type="text" id="new-name" class="wide" value="First National Bank of Caprock"></div>
       <div class="ctl"><label>Seed (optional — same seed, same world)</label>
         <input type="text" id="new-seed" placeholder="random"></div>
+      <div class="ctl"><label><input type="checkbox" id="new-guided" checked style="width:auto">
+        Guided first year (a tour + advisor nudges — recommended if banking is new to you)</label></div>
       <div style="margin-top:8px"><button class="primary" onclick="newGame()">Charter the bank</button></div>
     </div>
     <div class="panel">
@@ -1027,6 +1316,7 @@ async function newGame() {
     const seedRaw = $('new-seed').value.trim();
     const body = { name: $('new-name').value.trim() || 'First National Bank of Caprock' };
     if (seedRaw) body.seed = parseInt(seedRaw) || 0;
+    body.guided = $('new-guided') ? $('new-guided').checked : true;
     const r = await api('/api/new', body);
     toast('Charter granted. Seed: ' + r.seed);
     await refresh();

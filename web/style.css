@@ -38,6 +38,7 @@ button:disabled { opacity: .4; cursor: default; }
 #nav {
   width: 152px; background: var(--bg2); border-right: 1px solid var(--line);
   padding: 8px 0; flex-shrink: 0; position: sticky; top: 42px; height: calc(100vh - 42px);
+  display: flex; flex-direction: column; overflow-y: auto;
 }
 #nav .tab {
   padding: 7px 14px; cursor: pointer; color: var(--dim); border-left: 3px solid transparent;
@@ -151,3 +152,47 @@ canvas.chart { width: 100%; background: #0a0e13; border: 1px solid var(--line);
 .kv { display: grid; grid-template-columns: auto auto; gap: 1px 16px; font-size: 12px; }
 .kv .k { color: var(--dim); }
 .kv .v { text-align: right; font-family: Consolas, monospace; }
+
+/* ---- Your Desk ---- */
+.gauges { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 14px; }
+@media (max-width: 1100px) { .gauges { grid-template-columns: 1fr 1fr; } }
+.gauge {
+  background: var(--bg2); border: 1px solid var(--line); border-radius: 8px;
+  padding: 10px 12px; cursor: pointer; border-left-width: 5px;
+  transition: background .1s;
+}
+.gauge:hover { background: var(--sel); }
+.gauge.g { border-left-color: var(--green); }
+.gauge.y { border-left-color: var(--amber); }
+.gauge.r { border-left-color: var(--red); background: #1c1215; }
+.gauge .glabel { color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
+.gauge .ghead { font-size: 15px; font-weight: 700; margin: 2px 0 4px; }
+.gauge.g .ghead { color: var(--green); }
+.gauge.y .ghead { color: var(--amber); }
+.gauge.r .ghead { color: var(--red); }
+.gauge .gdetail { color: var(--dim); font-size: 11.5px; line-height: 1.4; }
+
+.advcards { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+@media (max-width: 1100px) { .advcards { grid-template-columns: 1fr; } }
+.advcard {
+  background: var(--bg2); border: 1px solid var(--line); border-radius: 8px;
+  padding: 12px 14px; border-left: 4px solid var(--blue);
+}
+.advcard.sev1 { border-left-color: var(--amber); }
+.advcard.sev2 { border-left-color: var(--red); background: #1c1215; }
+.advcard .advtitle { font-weight: 700; font-size: 13.5px; color: #fff; margin-bottom: 5px; }
+.advcard.sev2 .advtitle { color: var(--red); }
+.advcard .advtext { color: var(--fg); font-size: 12.5px; line-height: 1.5; }
+
+.tutorial { border-left: 4px solid var(--accent); margin-bottom: 12px; }
+.tutstep { display: flex; gap: 10px; padding: 5px 0; align-items: flex-start; }
+.tutstep.done { color: var(--faint); }
+.tutstep.done b { color: var(--faint); font-weight: 400; text-decoration: line-through; }
+.tutstep.now b { color: var(--green); }
+.tutmark { width: 18px; color: var(--green); font-weight: 700; flex-shrink: 0; }
+
+.prevbar {
+  min-height: 16px; margin-top: 6px; font-size: 11.5px; color: var(--amber);
+  font-style: italic; line-height: 1.4;
+}
+.term { border-bottom: 1px dotted var(--dim); cursor: help; }

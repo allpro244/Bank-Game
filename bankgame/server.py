@@ -13,6 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from .store import Store
 from .sim import engine, ledger as L, statements, securities, competitors
 from .sim import deposits as DEP, loans as LN, regulation as REG, funding as FUND
+from .sim import advisor as ADV
 from .sim.newgame import new_game
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "web")
@@ -79,6 +80,8 @@ class Game:
             "crisis": {"rumor": s["crisis"]["rumor"],
                        "run_active": s["crisis"]["run_active"],
                        "run_days": s["crisis"]["run_days"]},
+            "peer_avg": ADV.peer_averages(s),
+            "model": ADV.model_constants(),
             "pending": s["events"]["pending"],
             "log": s["events"]["log"][-20:],
             "counts": {"loan_queue": len(bank["loans"]["queue"]),
@@ -306,6 +309,21 @@ class Game:
                            for m in ledger["months"][-36:]],
             }
 
+        if name == "desk":
+            ADV.ensure(s)
+            open_cases = [c for c in bank["fraud"]["cases"] if c["status"] == "open"]
+            return {
+                "gauges": ADV.gauges(s),
+                "cards": ADV.cards(s),
+                "tutorial": ADV.tutorial(s),
+                "inbox": {
+                    "events": s["events"]["pending"],
+                    "loans": bank["loans"]["queue"],
+                    "fraud": open_cases,
+                },
+                "peer_avg": ADV.peer_averages(s),
+            }
+
         if name == "events":
             return {"log": s["events"]["log"], "pending": s["events"]["pending"]}
 
@@ -383,6 +401,9 @@ class Handler(BaseHTTPRequestHandler):
                     seed = int.from_bytes(os.urandom(4), "big")
                 with GAME.lock:
                     GAME.state = new_game(name, seed)
+                    if body.get("guided") is False:
+                        from .sim import advisor as _adv
+                        _adv.tutorial_off(GAME.state)
                     GAME.store.create_save(name, seed)
                     GAME.store.snapshot(GAME.state)
                 return self._json({"ok": True, "seed": seed})
