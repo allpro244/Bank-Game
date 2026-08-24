@@ -15,6 +15,7 @@ something that needs your decision.
 """
 
 import datetime
+import math
 
 from . import ledger as L
 from . import rng as R
@@ -175,6 +176,19 @@ def step_day(state):
     bank["cached_assets"] = L.total_assets(bank["ledger"])
 
     problems = L.audit(bank["ledger"])
+    pool_total = deposits.totals(bank["deposits"])["_total"]
+    brokered = -bank["ledger"]["balances"]["2050"]
+    if pool_total != L.total_deposits(bank["ledger"]) - brokered:
+        problems.append("deposit pools %d != GL deposits-brokered %d"
+                        % (pool_total, L.total_deposits(bank["ledger"]) - brokered))
+    loans_total = loans.total_loans(bank["loans"])
+    if loans_total != bank["ledger"]["balances"]["1300"]:
+        problems.append("loan pools %d != GL 1300 %d"
+                        % (loans_total, bank["ledger"]["balances"]["1300"]))
+    htm_book = sum(l["book"] for l in bank["securities"]["lots"] if l["cls"] == "HTM")
+    if bank["ledger"]["balances"]["1210"] != htm_book:
+        problems.append("HTM lots %d != GL 1210 %d"
+                        % (htm_book, bank["ledger"]["balances"]["1210"]))
     if problems:
         state["audit_alarm"] = {"date": state["time"]["date"], "problems": problems}
         raised.append(push_event(state, {
@@ -620,31 +634,44 @@ def _resolve_bank_purchase(state, ev):
                        % (deal["name"], bank["name"], f"{goodwill // 100:,}")}
 
 
+def _split_cents(total, weights):
+    """Integer split that hands the leftover cents to the last bucket."""
+    if not weights:
+        return []
+    wsum = sum(w for _, w in weights) or 1
+    out = []
+    alloc = 0
+    for i, (key, w) in enumerate(weights):
+        amt = total - alloc if i == len(weights) - 1 else int(total * w / wsum)
+        alloc += amt
+        out.append((key, amt))
+    return out
+
+
 def _absorb_franchise(state, markets, deposits_amt, loans_amt, n_branches, src_name):
     """Distribute acquired deposits/loans into pools; add branches."""
     bank = state["bank"]
     from .deposits import open_market, PRODUCTS as DP, MIX
     mkts = [m for m in markets if m in state["regions"]] or ["caprock"]
-    per_mkt = deposits_amt // len(mkts)
-    for mid in mkts:
+    dep_by_mkt = _split_cents(deposits_amt, [(m, 1) for m in mkts])
+    for mid, share in dep_by_mkt:
         open_market(bank["deposits"], mid)
         bank["ops"]["brand"].setdefault(mid, 8.0)
         bank["ops"]["marketing"].setdefault(mid, 0)
         pools = bank["deposits"]["pools"][mid]
-        for p in DP:
-            add = int(per_mkt * MIX[p])
+        for p, add in _split_cents(share, [(prod, MIX[prod]) for prod in DP]):
             pools[p]["balance"] += add
-            pools[p]["accounts"] += max(1, add // 10_000_00)
+            if add > 0:
+                pools[p]["accounts"] += max(1, add // 10_000_00)
             if p.startswith("cd_"):
                 from .deposits import effective_rate
                 pools[p]["wavg_rate"] = effective_rate(state, p)
     # loans: spread across ci/cre/mortgage/small_business in those markets
     year = state["time"]["date"][:4]
     split = [("ci", 0.3), ("cre", 0.35), ("mortgage", 0.2), ("small_business", 0.15)]
-    per_mkt_l = loans_amt // len(mkts)
-    for mid in mkts:
-        for prod, frac in split:
-            amt = int(per_mkt_l * frac)
+    loan_by_mkt = _split_cents(loans_amt, [(m, 1) for m in mkts])
+    for mid, share in loan_by_mkt:
+        for prod, amt in _split_cents(share, split):
             if amt > 0:
                 rate = loans.offer_rate(state, prod, "B", mid)
                 loans.add_to_pool(bank["loans"], prod, mid, "B", year, amt, rate, 1.1)
@@ -1038,15 +1065,29 @@ def _handle_event_choice(state, ev, choice, payload):
 def _resolve_overnight_choice(state, ev, choice):
     """Player covers (or declines to cover) an ask-policy cash hole."""
     from . import funding as FUND
+    import datetime
     need = int(ev.get("need") or 0)
     cash = state["bank"]["ledger"]["balances"]["1000"]
     if cash < 0:
         need = max(need, -cash)
     if choice == "wait":
+        took = FUND.take_fed_funds(state, need,
+                                   "Fed funds purchased (wait — penalty path)")
+        leftover = need - took
         state["bank"]["funding"]["shrink_originations"] = True
-        return {"message": "You left the hole open. Next month's idle "
-                           "originations will shrink. Cover it from Treasury, "
-                           "or the clock will stop again tomorrow."}
+        until = datetime.date.fromisoformat(state["time"]["date"]) + \
+            datetime.timedelta(days=FUND.OVERNIGHT_WAIT_DAYS)
+        state["bank"]["funding"]["overnight_wait_until"] = until.isoformat()
+        state["bank"]["funding"]["overnight_wait_need"] = max(0, leftover)
+        if leftover > 0:
+            return {"message": "Fed-funds counterparties took $%s. The remaining "
+                               "$%s stays as a penalty overdraft (fed funds + 150bp) "
+                               "and we will not nag you every morning. "
+                               "Originations shrink until cash recovers."
+                               % (f"{took // 100:,}", f"{leftover // 100:,}")}
+        return {"message": "Covered overnight with fed funds. Originations will "
+                           "shrink until cash recovers. We will not re-ask for "
+                           "three weeks unless the hole grows."}
     if choice == "fhlb":
         take = max(100_000_00, (need + 99_999_00) // 100_000_00 * 100_000_00)
         res = FUND.take_fhlb(state, take, FUND.OVERNIGHT_FHLB_MONTHS)
@@ -1054,10 +1095,17 @@ def _resolve_overnight_choice(state, ev, choice):
             raise ActionError(res)
         return {"message": "FHLB advance drawn to cover the overnight hole."}
     if choice == "fed_funds":
-        take = max(1, need)
-        L.post(state["bank"]["ledger"], state["time"]["date"],
-               "Fed funds purchased (overnight, player)",
-               [["1000", take, 0], ["2110", 0, take]], tag="fund")
+        took = FUND.take_fed_funds(state, need,
+                                   "Fed funds purchased (overnight, player)")
+        leftover = need - took
+        if leftover > 0:
+            L.post(state["bank"]["ledger"], state["time"]["date"],
+                   "DISCOUNT WINDOW borrowing (fed-funds limit reached)",
+                   [["1000", leftover, 0], ["2120", 0, leftover]], tag="fund")
+            state["bank"]["funding"]["discount_window_uses"] += 1
+            return {"message": "Counterparties would only take $%s overnight. "
+                               "The remaining $%s went to the discount window."
+                               % (f"{took // 100:,}", f"{leftover // 100:,}")}
         return {"message": "Borrowed fed funds overnight."}
     if choice == "window":
         take = max(1, need)
@@ -1121,12 +1169,16 @@ def set_policy(state, path, value):
         elif typ is int:
             if not isinstance(value, (int, float)):
                 raise ActionError("numeric value required")
+            if isinstance(value, float) and not math.isfinite(value):
+                raise ActionError("not a valid number")
             value = int(value)
             if value < lo or value > hi:
                 raise ActionError("value out of range [%s, %s]" % (lo, hi))
         elif typ is float:
             if not isinstance(value, (int, float)):
                 raise ActionError("numeric value required")
+            if isinstance(value, float) and not math.isfinite(value):
+                raise ActionError("not a valid number")
             value = float(value)
             if value < lo or value > hi:
                 raise ActionError("value out of range [%s, %s]" % (lo, hi))
@@ -1141,5 +1193,8 @@ def set_policy(state, path, value):
             if parts[-1] not in state["regions"]:
                 raise ActionError("unknown market")
         node[parts[-1]] = value
+        if path == "fraud.threshold":
+            state["bank"]["fraud"]["false_positive_drag"] = round(
+                max(0.0, (value - 1) * 0.006), 4)
         return {"path": path, "value": value}
     raise ActionError("unknown or protected policy path: %s" % path)

@@ -159,11 +159,18 @@ def _progress_bits(state, gid, years):
             bits = ("#1 of %d on the map. World table is $250B — you are at %s."
                     % (race["field"], _fm_assets(race["me"])))
         else:
-            bits = ("You are #%d of %d. %s is still %s ahead."
-                    % (race["rank"], race["field"], race["rival_name"],
-                       _fm_assets(race["rival_assets"] - race["me"])))
-        size = 0.55 * min(1.0, race["me"] / max(1, race["rival_assets"]))
-        crown = 0.45 * min(1.0, race["me"] / max(1, WORLD_CROWN))
+            nxt = race.get("next_name") or race["rival_name"]
+            nxt_a = race.get("next_assets") or race["rival_assets"]
+            bits = ("You are #%d of %d. Next to pass: %s at %s. %s still leads the map."
+                    % (race["rank"], race["field"], nxt, _fm_assets(nxt_a),
+                       race["rival_name"]))
+        if race["beats_rivals"]:
+            size = 0.55
+        else:
+            nxt_a = race.get("next_assets") or race["rival_assets"]
+            size = 0.85 * min(1.0, race["me"] / max(1, nxt_a))
+        crown = (0.45 if race["beats_rivals"] else 0.15) * min(
+            1.0, race["me"] / max(1, WORLD_CROWN))
         return bits, size + crown
 
     if gid == "independent":
@@ -242,10 +249,20 @@ def world_race(state):
         rival_assets = 0
         rival_name = "no living rival"
     ahead = sum(1 for b in alive if (b.get("assets") or 0) > me)
+    larger = [b for b in alive if (b.get("assets") or 0) > me]
+    if larger:
+        nxt = min(larger, key=lambda b: b.get("assets") or 0)
+        next_assets = int(nxt.get("assets") or 0)
+        next_name = nxt.get("name") or "a rival"
+    else:
+        next_assets = rival_assets
+        next_name = rival_name
     return {
         "me": me,
         "rival_assets": rival_assets,
         "rival_name": rival_name,
+        "next_assets": next_assets,
+        "next_name": next_name,
         "rank": 1 + ahead,
         "field": 1 + len(alive),
         "crown": WORLD_CROWN,

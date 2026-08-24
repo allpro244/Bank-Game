@@ -185,7 +185,17 @@ async function advance(unit) {
   if (BUSY) return;
   BUSY = true;
   try {
-    const r = await api('/api/advance', { unit });
+    let r = await api('/api/advance', { unit });
+    if (r.result && r.result.inbox && (r.result.days || 0) === 0) {
+      const ok = confirm('Your Desk still has a decision. Advance anyway? '
+        + 'Unanswered memos will age and may expire.');
+      if (ok) r = await api('/api/advance', { unit, skip_inbox: true });
+      else {
+        toast('The clock stopped: something on Your Desk needs a decision first.');
+        await refresh();
+        return;
+      }
+    }
     await refresh();
     const evs = r.result.events || [];
     const blocked = evs.some(e => e.blocking);
@@ -214,7 +224,11 @@ function renderTopbar() {
   $('tb-name').textContent = b.name;
   $('tb-date').textContent = SUM.time.display || SUM.time.date;
   $('tb-assets').textContent = fmc(b.assets);
-  $('tb-cash').textContent = fmc(b.cash);
+  const cashEl = $('tb-cash');
+  cashEl.textContent = fmc(b.cash);
+  cashEl.title = 'Spendable: vault ' + fmc(b.vault) +
+    ' · at the Fed ' + fmc(b.fed_balances) +
+    ' · fed funds sold ' + fmc(b.fed_funds_sold);
   $('tb-equity').textContent = fmc(b.equity);
   const ni = $('tb-ni');
   ni.textContent = fmc(b.ni_mtd);
@@ -429,9 +443,10 @@ function renderTutorial(tut) {
         <div><b>${esc(s.title)}</b>
           ${(!s.done && next && s.id === next.id) ? `<div class="sub">${esc(s.text)}</div>
             <div style="margin-top:4px">
-              <button class="small primary" onclick="switchTab('${s.tab}')">Take me there</button>
+              ${s.id === 'welcome'
+                ? `<button class="small primary" onclick="clickGauge('earnings')">Show me a health light</button>`
+                : `<button class="small primary" onclick="switchTab('${s.tab}')">Take me there</button>`}
               ${s.id !== 'exam' && s.id !== 'welcome' ? `<button class="small" onclick="act('tutorial_ack',{step_id:'${s.id}'})">Mark done</button>` : ''}
-              ${s.id === 'welcome' ? '<span class="sub">Click a health light above — that is the only way to finish this step.</span>' : ''}
             </div>` : ''}
         </div>
       </div>`).join('')}
@@ -801,7 +816,7 @@ async function tabLending(m) {
         <th class="r">Balance</th><th class="r">Rate</th><th>Tier</th><th>Status</th></tr>
         ${d.large.slice().reverse().map(l => `<tr>
           <td>${esc(l.name)}</td><td>${PRODUCT_LABELS[l.product] || l.product}</td>
-          <td>${esc(l.market)}</td><td class="r">${fm(l.balance)}</td>
+          <td>${esc(l.market_name || l.market)}</td><td class="r">${fm(l.balance)}</td>
           <td class="r">${pct(l.rate)}</td><td>${l.tier}</td>
           <td>${statusPill(l.status)}</td></tr>`).join('')}</table>`
         : '<span class="sub">No individually-tracked large credits yet.</span>'}
@@ -993,8 +1008,9 @@ async function tabTreasury(m) {
     <div class="panel">
       <p class="stance">${esc(cashLine)}</p>
       <div class="kv">
-        <span class="k">Cash on hand</span><span class="v">${fm(d.cash)}</span>
-        <span class="k">Fed funds sold</span><span class="v">${fmc(d.fed_funds_sold)}</span>
+        <span class="k">Spendable cash</span><span class="v">${fm(d.cash)}</span>
+        <span class="k">Vault / at the Fed / sold</span>
+        <span class="v">${fmc(d.vault)} / ${fmc(d.fed_balances)} / ${fmc(d.fed_funds_sold)}</span>
         <span class="k">${dt('liquidity')}</span><span class="v">${pct(liq, 1)}</span>
       </div>
       <div class="ctl" style="margin-top:8px"><label>Overnight shortfall</label>
@@ -1005,7 +1021,7 @@ async function tabTreasury(m) {
       <div class="helptip">Ask is the owner default. Auto still logs every window use; examiners count them either way.</div>
     </div>
     <div class="cards" style="margin-top:12px">
-      ${card('Cash', fmc(d.cash), 'fed funds sold ' + fmc(d.fed_funds_sold))}
+      ${card('Spendable cash', fmc(d.cash), 'vault ' + fmc(d.vault) + ' · Fed ' + fmc(d.fed_balances))}
       ${card(dt('afs', MODE === 'owner' ? 'Sellable bonds (AFS)' : 'AFS portfolio'), fmc(s.afs_mv), 'book ' + fmc(s.afs_book))}
       ${card(dt('htm', MODE === 'owner' ? 'Locked bonds (HTM)' : 'HTM portfolio'), fmc(s.htm_book), 'unrealized ' + fmc(s.htm_unrealized), cls(s.htm_unrealized))}
       ${card('Portfolio yield', pct(s.yield), dt('duration') + ' ' + s.duration + 'y')}
@@ -1122,7 +1138,7 @@ async function tabOps(m) {
           <td class="r ${s.morale < 0.6 ? 'neg' : s.morale < 0.75 ? 'warn' : 'pos'}">${Math.round(s.morale * 100)}%</td>
           <td class="r">${fmc(s.salary)}/yr</td>
           <td><button class="small" onclick="act('hire',{role:'${r}',count:1})">Hire</button>
-              <button class="small" onclick="act('fire',{role:'${r}',count:1})">Cut</button>
+              <button class="small" onclick="confirmFire('${r}', ${s.count})">Cut</button>
               <button class="small" onclick="act('train',{role:'${r}'})">Train</button></td></tr>`;
       }).join('')}
       </table>
@@ -1137,8 +1153,8 @@ async function tabOps(m) {
       <div class="helptip">Lenders drive loan volume. Compliance keeps examiners calm. Underpaid people quit; your best lender can defect with their book.</div>
 
       <h3>Technology</h3>
-      <div class="ctl"><button class="small primary" onclick="act('invest_digital')">Upgrade digital (level ${d.digital_level + 1})</button>
-        <button class="small" onclick="act('upgrade_core')">Replace core system</button></div>
+      <div class="ctl"><button class="small primary" onclick="confirmDigital()">Upgrade digital (level ${d.digital_level + 1} · ${fm(d.digital_next_cost || 0)})</button>
+        <button class="small" onclick="confirmCore()">Replace core system (${fm(d.core_cost || 0)})</button></div>
       <div class="ctl"><label>Cybersecurity $/mo</label>
         <input type="number" id="cyb" value="${d.cyber_spend / 100}"
           onchange="setPol('ops.cyber_spend', Math.round(parseFloat(this.value)*100))"></div>
@@ -1152,7 +1168,7 @@ async function tabOps(m) {
       ${d.branches.filter(b => b.open).map(b => `<tr><td>${b.id}</td>
         <td>${esc(d.markets[b.market] ? d.markets[b.market].name : b.market)}</td>
         <td class="r">${fmc(b.monthly_cost)}</td><td>${esc(b.opened)}</td>
-        <td><button class="small danger" onclick="act('close_branch',{branch_id:${b.id}})">Close</button></td></tr>`).join('')}
+        <td><button class="small danger" onclick="confirmCloseBranch(${b.id}, '${esc(d.markets[b.market] ? d.markets[b.market].name : b.market)}')">Close</button></td></tr>`).join('')}
       </table>
       <div class="ctl" style="margin-top:8px"><label>Open branch in</label>
         <select id="br-mkt" onchange="showBranchPreview()">${branchOptions(d)}</select>
@@ -1207,7 +1223,8 @@ function branchOptions(d) {
     if (!rows.length) return '';
     return `<optgroup label="${esc(KIND_LABELS[k] || k)}">${rows.map(([mid, mk]) => {
       const p = (d.previews || {})[mid] || {};
-      const tag = p.verdict === 'cannot_fund' ? ' — cannot fund'
+      const tag = p.already ? ' — already open'
+        : p.verdict === 'cannot_fund' ? ' — cannot fund'
         : p.verdict === 'lethal' ? ' — capital event'
         : p.verdict === 'stretch' ? ' — stretch' : '';
       return `<option value="${esc(mid)}">${esc(mk.name)} · open ${fmc(p.cost || 0)}${tag}</option>`;
@@ -1230,8 +1247,8 @@ function showBranchPreview() {
     + `Pro-forma leverage ${lev}% (${esc(vtxt)}).`;
   box.className = 'prevbar' + (p.verdict === 'lethal' || p.verdict === 'cannot_fund' ? ' neg' : '');
   if (btn) {
-    btn.disabled = !p.can_fund;
-    btn.textContent = p.can_fund ? 'Review & open' : 'Cannot fund';
+    btn.disabled = !p.can_fund || p.already;
+    btn.textContent = p.already ? 'Already open' : (p.can_fund ? 'Review & open' : 'Cannot fund');
   }
 }
 
@@ -1285,33 +1302,67 @@ function openMarketPreview(mid) {
         <span class="v">${((p.proforma_leverage || 0) * 100).toFixed(1)}%</span></div>
       <p class="moved">${esc(vtxt)}</p>
     </div>`;
-  const btns = p.can_fund
-    ? [['Open this branch', `closeText();confirmOpenBranch('${mid}','markets')`,
+  const btns = p.can_fund && !p.already
+    ? [['Open this branch', `closeText();act('open_branch',{market:${JSON.stringify(mid)}})`,
         (p.verdict === 'lethal' || p.verdict === 'stretch') ? 'danger' : 'primary']]
     : [];
   showHtml('Branch preview — ' + p.name, html, btns);
 }
 
+function confirmFire(role, count) {
+  const last = count <= 1;
+  const ok = confirm(last
+    ? 'This is your last ' + (ROLE_LABELS[role] || role).toLowerCase()
+      + '. Originations or controls in that seat will stall. Let them go?'
+    : 'Let this person go? Severance hits earnings this month.');
+  if (ok) act('fire', { role, count: 1 });
+}
+function confirmDigital() {
+  const d = SEC.ops || {};
+  const ok = confirm('Upgrade digital for ' + fm(d.digital_next_cost || 0)
+    + '? That is an expense, not an asset — it leaves the vault.');
+  if (ok) act('invest_digital');
+}
+function confirmCore() {
+  const d = SEC.ops || {};
+  const ok = confirm('Replace the core system for ' + fm(d.core_cost || 0) + '?');
+  if (ok) act('upgrade_core');
+}
+function confirmCloseBranch(id, name) {
+  const ok = confirm('Close the ' + name + ' branch? This costs '
+    + fm(35000000) + ' and you cannot close your last office.');
+  if (ok) act('close_branch', { branch_id: id });
+}
 function confirmOpenBranch(market, source) {
   const mid = market || ($('br-mkt') && $('br-mkt').value);
   if (!mid) return;
   const src = source || 'ops';
-  const p = ((SEC[src] || {}).previews || {})[mid];
+  const p = ((SEC[src] || SEC.ops || {}).previews || {})[mid];
   if (!p) return;
+  if (p.already) {
+    toast('You already have a branch in ' + (p.name || mid) + '.', true);
+    return;
+  }
   if (!p.can_fund) {
     toast('Not enough cash to open this branch ($' + Math.round(p.cost / 100).toLocaleString() + ' needed).', true);
     return;
   }
-  if (p.verdict === 'lethal' || p.verdict === 'stretch') {
-    const ok = confirm(
-      (p.verdict === 'lethal'
-        ? 'This branch will dilute you below well-capitalized. '
-        : 'This branch is a stretch for your capital. ')
-      + 'Year-1 gather ≈ ' + fm(p.year1_gather)
-      + ', pro-forma leverage ' + ((p.proforma_leverage || 0) * 100).toFixed(1) + '%. Open anyway?');
-    if (!ok) return;
-  }
-  act('open_branch', { market: mid });
+  const vtxt = VERDICT_TEXT[p.verdict] || p.verdict;
+  const html = `<div class="memoform">
+      <div class="who-name">${esc(p.name)}</div>
+      <div class="sub">${esc(KIND_LABELS[p.kind] || p.kind || '')}</div>
+      <div class="memorow"><span class="k">Open cost</span><span class="v">${fm(p.cost)}</span></div>
+      <div class="memorow"><span class="k">Monthly</span><span class="v">${fm(p.monthly)}/mo</span></div>
+      <div class="memorow"><span class="k">Year-1 gather</span><span class="v">≈ ${fm(p.year1_gather)}</span></div>
+      <div class="memorow"><span class="k">Pro-forma leverage</span>
+        <span class="v">${((p.proforma_leverage || 0) * 100).toFixed(1)}%</span></div>
+      <p class="moved">${esc(vtxt)}</p>
+    </div>`;
+  const danger = (p.verdict === 'lethal' || p.verdict === 'stretch');
+  showHtml('Branch preview — ' + p.name, html, [
+    ['Open this branch', `closeText();act('open_branch',{market:${JSON.stringify(mid)}})`,
+     danger ? 'danger' : 'primary']
+  ]);
 }
 
 /* ---------------- Risk & Reg ---------------- */
@@ -1363,7 +1414,7 @@ async function tabRisk(m) {
       <div class="kv">
         <span class="k">Detection rate</span><span class="v">${pct(d.fraud.detection, 0)}</span>
         <span class="k">Fraud environment</span><span class="v">${d.fraud.env.toFixed(2)}x</span>
-        <span class="k">False-positive drag</span><span class="v">${pct(d.fraud.false_positive_drag)}</span>
+        <span class="k">False-positive drag on deposits</span><span class="v">${pct(d.fraud.false_positive_drag, 2)}</span>
       </div>
       <div class="ctl" style="margin-top:6px"><label>Prevention $/mo</label>
         <input type="number" value="${d.fraud.prevention_spend / 100}"
@@ -1719,7 +1770,7 @@ async function showSaves() {
         ${latest.goal_label ? `<span class="sub"> · ${esc(latest.goal_label)}</span>` : ''}
         <span class="sub"> · seed ${latest.seed}</span></p>
       <div style="margin-top:8px">
-        <button class="primary" onclick="loadSave(${JSON.stringify(esc(latest.name))})">Continue this bank</button>
+        <button class="primary" onclick='loadSave(${jattr(latest.name)})'>Continue this bank</button>
       </div>
     </div>` : ''}
     <div class="panel">
@@ -1771,8 +1822,8 @@ async function showSaves() {
           <td>${s.camels != null ? (MODE === 'owner' ? 'Report card ' : 'CAMELS ') + s.camels : '—'}</td>
           <td>${esc(s.pca || '—')}</td>
           <td>${esc(s.goal_label || '')}</td>
-          <td><button class="small primary" onclick="loadSave(${JSON.stringify(esc(s.name))})">Load</button>
-              <button class="small danger" onclick="if(confirm('Delete this save?'))deleteSave(${JSON.stringify(esc(s.name))})">Delete</button></td>
+          <td><button class="small primary" onclick='loadSave(${jattr(s.name)})'>Load</button>
+              <button class="small danger" onclick='if(confirm("Delete this save?"))deleteSave(${jattr(s.name)})'>Delete</button></td>
         </tr>`).join('')}</table>` : '<span class="sub">No saved banks yet.</span>'}
     </div>
     ${d.current ? `<div class="panel">
@@ -1820,6 +1871,8 @@ function modalOpen() {
 
 document.addEventListener('keydown', e => {
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+  const savesOpen = $('savescreen') && !$('savescreen').classList.contains('hidden');
+  if (savesOpen) return;
   const textOpen = $('textmodal') && !$('textmodal').classList.contains('hidden');
   if ((e.key === 'Escape' || e.key === 'Esc') && textOpen) {
     e.preventDefault();

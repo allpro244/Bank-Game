@@ -706,8 +706,8 @@ def tutorial(state):
     steps = [
         {"id": "welcome", "title": "Get the lay of the land",
          "text": "Look at the six health lights above — click any of them to see "
-                 "the full picture behind it. Green means sleep well. Then come "
-                 "back and mark this done.",
+                 "the full picture behind it. Green means sleep well. "
+                 "Click a light (or Show me a health light) to finish this step.",
          "done": "welcome" in acked, "tab": "desk"},
         {"id": "deposits", "title": "Take a stance on deposit pricing",
          "text": "Open the Deposits tab. Your rates track the market; your lever "
