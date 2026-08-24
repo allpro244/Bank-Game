@@ -1829,11 +1829,16 @@ function renderEventModal() {
   box.classList.remove('hidden');
   let controls = '';
   if (ev.type === 'fdic_auction') {
+    const pf = ev.proforma || {};
+    const blocked = pf.can_bid === false;
+    const why = (pf.blockers || []).join('; ');
     controls = `<div class="ctl"><label>Your bid: deposit premium (bp)</label>
-        <input type="number" id="bid-bp" value="80" min="0" max="1000"></div>
+        <input type="number" id="bid-bp" value="80" min="0" max="1000" ${blocked ? 'disabled' : ''}></div>
       <div class="btnrow">
-        <button class="primary" onclick="eventChoice(${ev.id}, 'bid', {premium_bp: numIn('bid-bp')})">Submit bid</button>
-        <button onclick="eventChoice(${ev.id}, 'pass')">Pass</button></div>`;
+        <button class="primary" ${blocked ? 'disabled title="' + esc(why) + '"' : ''}
+          onclick="eventChoice(${ev.id}, 'bid', {premium_bp: numIn('bid-bp')})">${blocked ? 'Cannot close' : 'Submit bid'}</button>
+        <button onclick="eventChoice(${ev.id}, 'pass')">Pass</button></div>
+      ${blocked ? `<div class="helptip">${esc(why)}</div>` : ''}`;
   } else if (ev.type === 'bank_for_sale') {
     const pf = (ev.deal && ev.deal.proforma) || {};
     const blocked = pf.can_buy === false;

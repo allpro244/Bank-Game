@@ -192,8 +192,10 @@ class TestOwnerChrome(unittest.TestCase):
     def test_world_bar_is_visible_on_day_one(self):
         state = new_game("World", seed=77, goal="world")
         p = GOALS.progress(state)
-        self.assertGreater(p["pct"], 0.05)
         self.assertIn("Next to pass", p["text"])
+        self.assertIn("Empire", p["text"])
+        # A $20M charter vs $26B / $250B is a rounding error, not a quarter bar.
+        self.assertLess(p["pct"], 0.03)
 
     def test_fp_drag_is_the_computed_fraction(self):
         g = Game()
