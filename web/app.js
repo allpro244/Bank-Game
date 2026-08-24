@@ -202,7 +202,7 @@ async function refresh() {
 function renderTopbar() {
   const b = SUM.bank;
   $('tb-name').textContent = b.name;
-  $('tb-date').textContent = SUM.time.date;
+  $('tb-date').textContent = SUM.time.display || SUM.time.date;
   $('tb-assets').textContent = fmc(b.assets);
   $('tb-cash').textContent = fmc(b.cash);
   $('tb-equity').textContent = fmc(b.equity);
@@ -290,14 +290,30 @@ async function renderTab() {
 
 function renderGameOver(m) {
   const g = SUM.game_over;
+  const kind = g.kind || 'seized';
+  const head = kind === 'seized' ? 'THE BANK HAS FAILED'
+    : kind === 'retired' ? 'YOU STEPPED AWAY'
+    : 'THE BANK WAS SOLD';
+  const tone = kind === 'seized' ? 'red' : 'amber';
+  const goal = g.goal || {};
+  const notes = (g.notes || []).map(n => `<li>${esc(n)}</li>`).join('');
   m.innerHTML = `
-    <div class="banner ${g.kind === 'sold' ? 'amber' : 'red'}" style="font-size:16px">
-      ${g.kind === 'seized' ? 'THE BANK HAS FAILED' : 'THE BANK WAS SOLD'}
-    </div>
-    <div class="panel"><p>${esc(g.summary)}</p>
-      <p class="sub" style="margin-top:8px">Final assets: ${fm(g.assets)} · ${g.years} years played · ${esc(g.date)}</p>
+    <div class="banner ${tone}" style="font-size:16px">${head}</div>
+    <div class="panel">
+      <p>${esc(g.summary)}</p>
+      <p class="sub" style="margin-top:8px">${esc(g.display_date || g.date)} · ${g.years} years · final assets ${fm(g.assets)}</p>
+      ${goal.label ? `<h3>Goal — ${esc(goal.label)}</h3>
+        <p>${goal.won ? 'Complete.' : (goal.failed ? 'Not this time.' : esc(goal.text || ''))}</p>` : ''}
+      ${g.exam ? `<h3>Last report card</h3><p>${esc(g.exam)}</p>` : ''}
+      <div class="kv" style="margin-top:8px">
+        <span class="k">Peak loans vs deposits</span><span class="v">${g.peak_ldr != null ? g.peak_ldr.toFixed(2) : '—'}</span>
+        <span class="k">Discount window uses</span><span class="v">${g.window_uses != null ? g.window_uses : '—'}</span>
+        <span class="k">Paper losses vs core capital</span><span class="v">${g.unreal_vs_cet1 != null ? pct(g.unreal_vs_cet1, 0) : '—'}</span>
+      </div>
+      ${notes ? `<h3>What mattered</h3><ul class="sub">${notes}</ul>` : ''}
+      ${g.earlier ? `<p style="margin-top:10px">${esc(g.earlier)}</p>` : ''}
       <div class="btnrow" style="margin-top:12px">
-        <button class="primary" onclick="showSaves()">Back to saves</button>
+        <button class="primary" onclick="showSaves()">Back to the title screen</button>
       </div>
     </div>`;
 }
@@ -311,12 +327,21 @@ async function tabDesk(m) {
   const nothingPending = !inbox.events.length && !inbox.loans.length && !inbox.fraud.length;
   const allGreen = g.every(x => x.status === 'g');
 
+  const goal = d.goal || SUM.goal;
+  const goalBar = goal ? `<div class="panel tight" style="margin-bottom:10px">
+      <b>${esc(goal.label)}</b>
+      <span class="sub"> — ${esc(goal.text)}</span>
+      <div style="margin-top:6px;background:#0a0e13;border-radius:4px;height:8px;overflow:hidden">
+        <div style="height:100%;width:${Math.round((goal.pct||0)*100)}%;background:${goal.won ? 'var(--green)' : 'var(--accent)'}"></div>
+      </div>
+    </div>` : '';
   m.innerHTML = `
     <h2>Your Desk <span class="sub">— what needs you, in plain English. Every light and card clicks through to the full detail.</span></h2>
+    ${goalBar}
 
     <div class="gauges">
       ${g.map(x => `
-        <div class="gauge ${x.status}" onclick="switchTab('${x.tab}')"
+        <div class="gauge ${x.status}" onclick="clickGauge('${x.tab}')"
              title="Click to open the full ${x.tab} view">
           <div class="glabel">${esc(x.label)}</div>
           <div class="ghead">${esc(x.head)}</div>
@@ -365,11 +390,18 @@ function renderTutorial(tut) {
           ${(!s.done && next && s.id === next.id) ? `<div class="sub">${esc(s.text)}</div>
             <div style="margin-top:4px">
               <button class="small primary" onclick="switchTab('${s.tab}')">Take me there</button>
-              ${s.id !== 'exam' ? `<button class="small" onclick="act('tutorial_ack',{step_id:'${s.id}'})">Mark done</button>` : ''}
+              ${s.id !== 'exam' && s.id !== 'welcome' ? `<button class="small" onclick="act('tutorial_ack',{step_id:'${s.id}'})">Mark done</button>` : ''}
+              ${s.id === 'welcome' ? '<span class="sub">Click a health light above — that is the only way to finish this step.</span>' : ''}
             </div>` : ''}
         </div>
       </div>`).join('')}
   </div>`;
+}
+
+async function clickGauge(tab) {
+  try { await api('/api/action', { action: 'tutorial_ack', payload: { step_id: 'welcome' } }); }
+  catch (e) { /* tour may be off */ }
+  switchTab(tab);
 }
 
 function renderAdvCard(c) {
@@ -479,8 +511,9 @@ async function tabDashboard(m) {
         </div>
       </div>
       <div class="panel">
-        <h3>Latest news</h3>
-        <div id="dash-news">${newsList(SUM.log)}</div>
+        <h3>This month</h3>
+        ${renderDigest(SUM.digest)}
+        <div class="sub" style="margin-top:8px">Full log is on the Events tab.</div>
       </div>
     </div>`;
   const hist = (await section('reports')).metrics_history;
@@ -507,6 +540,24 @@ function curveAt(curve, tenor) {
   const p = curve.find(c => c[0] === tenor);
   return p ? p[1] : null;
 }
+function renderDigest(d) {
+  if (!d) return '<span class="sub">Advance a month to get a digest. The firehose lives on Events.</span>';
+  const bits = [
+    `<div>${esc(d.econ)}</div>`,
+    `<div class="kv" style="margin-top:6px">
+      <span class="k">Month’s profit</span><span class="v ${cls(d.ni)}">${fm(d.ni)}</span>
+      <span class="k">Deposits</span><span class="v ${cls(d.dep_flow)}">${d.dep_flow >= 0 ? '+' : ''}${fmc(d.dep_flow)}</span>
+      <span class="k">Loans</span><span class="v ${cls(d.loan_flow)}">${d.loan_flow >= 0 ? '+' : ''}${fmc(d.loan_flow)}</span>
+      <span class="k">${MODE === 'owner' ? 'Loans vs deposits' : 'LDR'}</span><span class="v">${d.ldr != null ? d.ldr.toFixed(2) : '—'}</span>
+    </div>`,
+    d.local ? `<div style="margin-top:6px">${esc(d.local)}</div>` : '',
+    d.exam ? `<div class="warn" style="margin-top:6px">${esc(d.exam)}</div>` : '',
+    d.window ? `<div class="sub">Window used ${d.window} time${d.window === 1 ? '' : 's'} this charter.</div>` : '',
+    d.fraud ? `<div class="sub">${d.fraud} fraud case${d.fraud === 1 ? '' : 's'} still open.</div>` : '',
+  ];
+  return bits.filter(Boolean).join('');
+}
+
 function newsList(log) {
   return (log || []).slice().reverse().map(ev =>
     `<div class="newsitem ${ev.blocking ? 'block' : ''}">
@@ -1335,6 +1386,26 @@ function renderEventModal() {
         onclick="eventChoice(${ev.id}, 'buy')">${blocked ? 'Cannot close' : 'Buy it'}</button>
       <button onclick="eventChoice(${ev.id}, 'pass')">Pass</button></div>
       ${blocked ? `<div class="helptip">${esc(why)}</div>` : ''}`;
+  } else if (ev.type === 'exam') {
+    const comp = ev.composite || 3;
+    const owner = MODE === 'owner' && ev.owner_title;
+    controls = `<div class="btnrow">
+      <button class="primary" onclick="dismissEvent(${ev.id})">Acknowledged</button></div>`;
+    box.innerHTML = `<div class="modalbox exam-modal c${comp}">
+      <h2>${esc(owner || ev.title)}</h2>
+      <div class="sub">${esc(ev.date)}${pend.length > 1 ? ` · ${pend.length - 1} more waiting` : ''}</div>
+      ${ev.owner_summary && MODE === 'owner' ? `<p style="margin:8px 0">${esc(ev.owner_summary)}</p>` : ''}
+      <pre>${esc(ev.text || '')}</pre>
+      ${controls}
+    </div>`;
+    return;
+  } else if (ev.type === 'quarter_close') {
+    controls = `<div class="btnrow">
+      <button class="primary" onclick="dismissEvent(${ev.id})">File it</button></div>`;
+  } else if (ev.type === 'goal_won') {
+    controls = `<div class="btnrow">
+      <button class="primary" onclick="eventChoice(${ev.id}, 'keep')">Keep playing</button>
+      <button onclick="eventChoice(${ev.id}, 'retire')">Retire to the title screen</button></div>`;
   } else if (ev.type === 'overnight_shortfall') {
     controls = `<div class="btnrow">
       <button class="primary" onclick="eventChoice(${ev.id}, 'fhlb')">Draw FHLB</button>
@@ -1428,7 +1499,9 @@ async function showSaves() {
     <p class="sub" style="margin-bottom:16px">A courthouse square in West Texas. $20 million in assets. Three employees. Your move.</p>
     ${latest ? `<div class="panel">
       <h3>Continue</h3>
-      <p>${esc(latest.name)} — ${esc(latest.date || 'just chartered')}
+      <p>${esc(latest.name)} — ${esc(latest.display_date || latest.date || 'just chartered')}
+        · ${latest.assets != null ? fmc(latest.assets) : ''}
+        ${latest.goal_label ? `<span class="sub"> · ${esc(latest.goal_label)}</span>` : ''}
         <span class="sub"> · seed ${latest.seed}</span></p>
       <div style="margin-top:8px">
         <button class="primary" onclick="loadSave(${JSON.stringify(esc(latest.name))})">Continue this bank</button>
@@ -1440,15 +1513,48 @@ async function showSaves() {
         <input type="text" id="new-name" class="wide" value="First National Bank of Caprock"></div>
       <div class="ctl"><label>Seed (optional — same seed, same world)</label>
         <input type="text" id="new-seed" placeholder="random"></div>
+      <div class="ctl"><label>Home market</label>
+        <select id="new-home">
+          <option value="caprock" selected>Caprock City, TX</option>
+          <option value="verhalen">Verhalen, TX</option>
+          <option value="plainview">Plainview, TX</option>
+          <option value="lubbock">Lubbock, TX</option>
+        </select></div>
+      <div class="ctl"><label>Era</label>
+        <select id="new-era">
+          <option value="sandbox" selected>Sandbox clock (Year 1, Year 2…)</option>
+          <option value="historical">Historical 2000</option>
+        </select></div>
+      <div class="ctl"><label>Difficulty</label>
+        <select id="new-diff">
+          <option value="easy">Easy — extra $1M capital, slower examiners</option>
+          <option value="standard" selected>Standard</option>
+          <option value="hard">Hard — thinner cash, hotter competition</option>
+        </select></div>
+      <div class="ctl"><label>Goal</label>
+        <select id="new-goal">
+          <option value="independent" selected>Stay independent 20 years</option>
+          <option value="square">Best bank on the square</option>
+          <option value="headline">Don't be the next headline</option>
+          <option value="regional">Regional, not reckless</option>
+          <option value="sell">Sell well</option>
+        </select></div>
       <div class="ctl"><label><input type="checkbox" id="new-guided" checked style="width:auto">
         Guided first year (a tour + advisor nudges — recommended if banking is new to you)</label></div>
       <div style="margin-top:8px"><button class="primary" onclick="newGame()">Charter the bank</button></div>
     </div>
     <div class="panel">
       <h3>Saved banks</h3>
-      ${d.saves.length ? `<table><tr><th>Name</th><th>Date reached</th><th class="r">Seed</th><th></th></tr>
+      ${d.saves.length ? `<table><tr><th>Name</th><th>When</th><th class="r">Year</th>
+        <th class="r">Assets</th><th>Report card</th><th>Capital</th><th>Goal</th><th></th></tr>
         ${d.saves.map(s => `<tr>
-          <td>${esc(s.name)}</td><td>${esc(s.date)}</td><td class="r mono">${s.seed}</td>
+          <td>${esc(s.name)}</td>
+          <td>${esc(s.display_date || s.date)}</td>
+          <td class="r">${s.year || '—'}</td>
+          <td class="r">${s.assets != null ? fmc(s.assets) : '—'}</td>
+          <td>${s.camels != null ? (MODE === 'owner' ? 'Report card ' : 'CAMELS ') + s.camels : '—'}</td>
+          <td>${esc(s.pca || '—')}</td>
+          <td>${esc(s.goal_label || '')}</td>
           <td><button class="small primary" onclick="loadSave(${JSON.stringify(esc(s.name))})">Load</button>
               <button class="small danger" onclick="if(confirm('Delete this save?'))deleteSave(${JSON.stringify(esc(s.name))})">Delete</button></td>
         </tr>`).join('')}</table>` : '<span class="sub">No saved banks yet.</span>'}
@@ -1468,6 +1574,10 @@ async function newGame() {
     const body = { name: $('new-name').value.trim() || 'First National Bank of Caprock' };
     if (seedRaw) body.seed = parseInt(seedRaw) || 0;
     body.guided = $('new-guided') ? $('new-guided').checked : true;
+    if ($('new-home')) body.home = $('new-home').value;
+    if ($('new-era')) body.era = $('new-era').value;
+    if ($('new-diff')) body.difficulty = $('new-diff').value;
+    if ($('new-goal')) body.goal = $('new-goal').value;
     const r = await api('/api/new', body);
     toast('Charter granted. Seed: ' + r.seed);
     await refresh();

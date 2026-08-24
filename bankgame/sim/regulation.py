@@ -378,8 +378,18 @@ def run_exam(state, rng):
                                 "components": comps, "text": report})
     if len(reg["exam_reports"]) > 40:
         del reg["exam_reports"][0]
+    tone = {1: "they are delighted", 2: "they are calm", 3: "they are watching",
+            4: "they are not happy", 5: "they are taking the keys"}[composite]
     events.append({"type": "exam", "blocking": True,
+                   "composite": composite,
+                   "components": dict(comps),
                    "title": "EXAMINATION COMPLETE — Composite rating: %d" % composite,
+                   "owner_title": "Report card: %d — %s" % (composite, tone),
+                   "owner_summary": (
+                       "Capital %d · loans %d · management %d · earnings %d · "
+                       "cash %d · rate risk %d."
+                       % (comps["C"], comps["A"], comps["M"], comps["E"],
+                          comps["L"], comps["S"])),
                    "text": report})
     return events
 

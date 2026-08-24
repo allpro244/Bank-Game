@@ -11,12 +11,23 @@ RNG_STREAMS = ["econ", "region", "credit", "deposit", "fraud", "comp", "ops",
                "crisis", "event", "misc"]
 
 
-def new_game(name="First National Bank of Caprock", seed=12345):
+def new_game(name="First National Bank of Caprock", seed=12345,
+             home="caprock", difficulty="standard", goal="independent",
+             era="sandbox"):
+    from . import goals as GOALS
+    if home not in dict(GOALS.HOME_CHOICES):
+        home = "caprock"
+    if difficulty not in GOALS.DIFFICULTIES:
+        difficulty = "standard"
+    if era not in GOALS.ERAS:
+        era = "sandbox"
+
     streams = R.make_streams(seed, RNG_STREAMS)
     rng_econ = R.Rng(streams["econ"])
 
     state = {
-        "meta": {"name": name, "seed": seed, "version": 1},
+        "meta": {"name": name, "seed": seed, "version": 2,
+                 "home": home, "difficulty": difficulty, "era": era},
         "time": {"date": START_DATE, "day_index": 0},
         "rng": streams,
         "economy": economy.new_economy(rng_econ),
@@ -30,6 +41,7 @@ def new_game(name="First National Bank of Caprock", seed=12345):
         "game_over": None,
         "audit_alarm": None,
         "bank": None,
+        "digests": [],
     }
 
     bank = {
@@ -58,8 +70,10 @@ def new_game(name="First National Bank of Caprock", seed=12345):
 
     _seed_balance_sheet(state)
     _seed_operations(state)
-    from . import advisor
+    _apply_difficulty(state)
+    from . import advisor, goals as GOALS
     advisor.ensure(state)
+    GOALS.attach(state, goal)
     _seed_first_credit(state)
     bank["cached_assets"] = L.total_assets(bank["ledger"])
     from .regulation import capital_ratios, pca_category
@@ -68,6 +82,28 @@ def new_game(name="First National Bank of Caprock", seed=12345):
                                           for k, v in r.items()}
     state["regulation"]["pca"] = pca_category(r)
     return state
+
+
+def _home(state):
+    return (state.get("meta") or {}).get("home", "caprock")
+
+
+def _apply_difficulty(state):
+    d = (state.get("meta") or {}).get("difficulty", "standard")
+    bank = state["bank"]
+    date = state["time"]["date"]
+    if d == "easy":
+        L.post(bank["ledger"], date, "Easy start: extra common capital",
+               [["1000", 1_000_000_00, 0], ["3000", 0, 1_000_000_00]], tag="open")
+        state["regulation"]["months_to_exam"] = 20
+    elif d == "hard":
+        take = min(400_000_00, bank["ledger"]["balances"]["1000"])
+        if take > 0:
+            L.post(bank["ledger"], date, "Hard start: thinner cash",
+                   [["3100", take, 0], ["1000", 0, take]], tag="open")
+        state["regulation"]["months_to_exam"] = 10
+        for r in state["regions"].values():
+            r["competition"] = round(r["competition"] * 1.15, 3)
 
 
 def _seed_balance_sheet(state):
@@ -85,7 +121,7 @@ def _seed_balance_sheet(state):
     nat = competitors.national_deposit_rates(econ)
     for prod, amt in dep_seed.items():
         rate = 0.0 if prod == "checking" else nat.get(prod, nat["savings"])
-        deposits.seed_pool(bank["deposits"], "caprock", prod, amt, rate)
+        deposits.seed_pool(bank["deposits"], _home(state), prod, amt, rate)
     total_dep = sum(dep_seed.values())
 
     # ---- loans: $13.2M seasoned home-market book ----
@@ -100,7 +136,7 @@ def _seed_balance_sheet(state):
     total_loans = 0
     for prod, tier, amt in loan_seed:
         rate = loans.offer_rate(state, prod, tier, "caprock")
-        pool = loans.add_to_pool(bank["loans"], prod, "caprock", tier, "1997",
+        pool = loans.add_to_pool(bank["loans"], prod, _home(state), tier, "1997",
                                  amt, rate, 1.0)
         pool["age_m"] = 30
         total_loans += amt
@@ -152,7 +188,8 @@ def _seed_balance_sheet(state):
 def _seed_operations(state):
     bank = state["bank"]
     ops = bank["ops"]
-    ops["branches"].append({"id": 1, "market": "caprock", "open": True, "quality": 2,
+    home = _home(state)
+    ops["branches"].append({"id": 1, "market": home, "open": True, "quality": 2,
                             "monthly_cost": operations.BRANCH_MONTHLY,
                             "opened": START_DATE})
     ops["next_branch_id"] = 2
@@ -161,8 +198,8 @@ def _seed_operations(state):
     ops["staff"]["lenders"]["count"] = 1
     ops["staff"]["lenders"]["skill"] = 2.6
     ops["staff"]["ops"]["count"] = 1
-    ops["brand"]["caprock"] = 24.0
-    ops["marketing"]["caprock"] = 1_500_00
+    ops["brand"][home] = 24.0
+    ops["marketing"][home] = 1_500_00
 
 
 def _seed_first_credit(state):
@@ -170,21 +207,25 @@ def _seed_first_credit(state):
     from . import loans as LN
     bank = state["bank"]
     amount = 620_000_00
-    rate = LN.offer_rate(state, "ag", "B", "caprock")
+    home = _home(state)
+    home_name = state["regions"][home]["name"]
+    rate = LN.offer_rate(state, "ag", "B", home)
     memo = (
         "CREDIT MEMO — Culpepper Cattle Co.\n"
-        "Market: Caprock City, TX | Product: AG | Request: $620,000\n"
+        "Market: %s | Product: AG | Request: $620,000\n"
         "Proposed rate: %.2f%% | Term: 60 months | Risk tier: B\n"
         "DSCR: 1.32x | LTV: 68%% | Collateral: crop liens, equipment, and ranch real estate\n"
         "Local conditions: activity index 1.00, no active local shocks\n"
         "Analyst note: Acceptable credit with adequate coverage. Watch leverage.\n"
+        "Why them: local operator, years in this county, deposits already here.\n"
+        "If we decline: they walk to First Cattlemen's Bank.\n"
         "This is your first large credit. Read it. Approve or decline — either "
         "is a real decision, and the tour will mark it done."
-    ) % (rate * 100)
+    ) % (home_name, rate * 100)
     bank["loans"]["next_loan_id"] = 2
     bank["loans"]["queue"].append({
         "id": 1, "name": "Culpepper Cattle Co.", "product": "ag",
-        "market": "caprock", "amount": amount, "rate": rate, "tier": "B",
+        "market": home, "amount": amount, "rate": rate, "tier": "B",
         "dscr": 1.32, "ltv": 0.68, "memo": memo, "days_left": 90,
         "term_m": 60, "can_fund": True,
     })

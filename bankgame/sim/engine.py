@@ -158,6 +158,15 @@ def _process_month_boundary(state, prev_date):
     L.close_month(bank["ledger"], month_label, state["time"]["date"])
     statements.record_metrics(state)
     bank["cached_assets"] = L.total_assets(bank["ledger"])
+    from . import goals as GOALS
+    GOALS.update_chronicle(state)
+    digest = GOALS.compose_digest(state)
+    state.setdefault("digests", []).append(digest)
+    if len(state["digests"]) > 24:
+        del state["digests"][:-24]
+    win = GOALS.check_win(state)
+    if win:
+        raised.append(push_event(state, win))
 
     if quarter_end:
         last3 = bank["ledger"]["months"][-3:]
@@ -167,12 +176,19 @@ def _process_month_boundary(state, prev_date):
         state["call_reports"].append(statements.call_report(state))
         if len(state["call_reports"]) > 120:
             del state["call_reports"][0]
+        mt = state["metrics"][-1] if state["metrics"] else {}
         raised.append(push_event(state, {
-            "type": "quarter_close", "blocking": False,
-            "title": "Quarter closed: net income $%s%s" % (
-                f"{bank['last_quarter_net_income'] // 100:,}",
-                (", dividend $%s" % f"{div // 100:,}") if div else ""),
-            "text": "The call report has been filed. See Reports for details."}))
+            "type": "quarter_close", "blocking": True,
+            "ni": bank["last_quarter_net_income"],
+            "cet1": mt.get("cet1_ratio"),
+            "ldr": mt.get("loan_to_deposit"),
+            "title": "Quarter closed",
+            "text": ("Net income $%s%s\nCore capital (CET1) %.1f%%\n"
+                     "Loans vs deposits %.2f\n\nThe call report is on Reports."
+                     % (f"{bank['last_quarter_net_income'] // 100:,}",
+                        (", dividend $%s" % f"{div // 100:,}") if div else "",
+                        (mt.get("cet1_ratio") or 0) * 100,
+                        mt.get("loan_to_deposit") or 0))}))
         # solvency backstop between exams
         r = regulation.capital_ratios(state)
         if r["tang_equity_ratio"] <= 0.02:
@@ -191,14 +207,10 @@ def _process_month_boundary(state, prev_date):
 
 
 def _game_over(state, kind):
-    m = state["metrics"][-1] if state["metrics"] else {}
-    state["game_over"] = {
-        "kind": kind, "date": state["time"]["date"],
-        "assets": state["bank"]["cached_assets"],
-        "years": round(state["economy"]["months"] / 12.0, 1),
-        "summary": ("After %.1f years, the story of %s ends here."
-                    % (state["economy"]["months"] / 12.0, state["bank"]["name"])),
-    }
+    from . import goals as GOALS
+    if kind == "seized" and state.get("meta", {}).get("goal") != "sell":
+        state.setdefault("meta", {})["goal_failed"] = True
+    state["game_over"] = GOALS.autopsy(state, kind)
 
 
 def _quarterly_taxes(state):
@@ -730,6 +742,17 @@ def perform_action(state, action, payload):
         res = operations.open_branch(state, p.get("market"), int(p.get("quality", 2)))
         if isinstance(res, str):
             raise ActionError(res)
+        mid = p.get("market")
+        home = (state.get("meta") or {}).get("home", "caprock")
+        if mid and mid != home:
+            chron = state.get("chronicle")
+            if not isinstance(chron, dict):
+                chron = {"notable": []}
+                state["chronicle"] = chron
+            notes = chron.setdefault("notable", [])
+            label = "Opened a branch in %s." % state["regions"].get(mid, {}).get("name", mid)
+            if label not in notes:
+                notes.append(label)
         return {"message": "Branch opened."}
 
     if action == "close_branch":
@@ -826,6 +849,10 @@ def perform_action(state, action, payload):
         advisor.tutorial_off(state)
         return {"message": "Tour dismissed. It won't come back."}
 
+    if action == "retire":
+        _game_over(state, "retired")
+        return {"message": "You retired. See the epilogue."}
+
     raise ActionError("unknown action: %s" % action)
 
 
@@ -851,16 +878,25 @@ def _handle_event_choice(state, ev, choice, payload):
 
     if ev["type"] == "buyout_offer":
         if choice == "accept":
-            state["game_over"] = {
-                "kind": "sold", "date": state["time"]["date"],
-                "assets": state["bank"]["cached_assets"],
-                "years": round(state["economy"]["months"] / 12.0, 1),
-                "summary": ("You sold the bank for $%s after %.1f years. The new owners "
-                            "renamed it within a month, and the courthouse square was never "
-                            "quite the same.")
-                           % (f"{ev['offer'] // 100:,}", state["economy"]["months"] / 12.0)}
+            from . import goals as GOALS
+            equity = L.total_equity(state["bank"]["ledger"])
+            tbv = max(1, equity - state["bank"]["ledger"]["balances"]["1600"])
+            GOALS.record_sale(state, ev["offer"], tbv)
+            win = GOALS.check_win(state)
+            _game_over(state, "sold")
+            if win:
+                state["game_over"]["goal"] = GOALS.progress(state)
             return {"message": "The bank is sold. See the epilogue."}
+        state.setdefault("chronicle", {}).setdefault("declined_buyouts", 0)
+        state["chronicle"]["declined_buyouts"] = (
+            state["chronicle"].get("declined_buyouts", 0) + 1)
         return {"message": "The board declined the offer."}
+
+    if ev["type"] == "goal_won":
+        if choice == "retire":
+            _game_over(state, "retired")
+            return {"message": "You retired. The square will remember the name."}
+        return {"message": "The sandbox stays open. Play on."}
 
     if ev["type"] == "fraud_case":
         res = fraud.resolve_case(state, ev["case_id"],

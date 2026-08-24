@@ -130,6 +130,11 @@ canvas.chart { width: 100%; background: #0a0e13; border: 1px solid var(--line);
   padding: 10px; margin: 8px 20px; color: var(--fg);
   flex: 1 1 auto; overflow-y: auto; min-height: 0;
 }
+.exam-modal.c1 h2 { color: var(--green); }
+.exam-modal.c2 h2 { color: var(--green); }
+.exam-modal.c3 h2 { color: var(--amber); }
+.exam-modal.c4 h2, .exam-modal.c5 h2 { color: var(--red); }
+
 .modalbox .btnrow {
   display: flex; gap: 8px; flex-wrap: wrap; flex-shrink: 0;
   padding: 12px 20px 16px; margin: 0; border-top: 1px solid var(--line);
@@ -153,7 +158,7 @@ canvas.chart { width: 100%; background: #0a0e13; border: 1px solid var(--line);
 .newsitem .nd { color: var(--faint); margin-right: 8px; font-family: Consolas, monospace; }
 .newsitem.block { color: var(--amber); }
 
-#savescreen { max-width: 640px; margin: 60px auto; }
+#savescreen { max-width: 860px; margin: 60px auto; }
 #savescreen .panel { margin-bottom: 14px; }
 .banner {
   padding: 8px 12px; border-radius: 6px; margin-bottom: 12px; font-weight: 600;

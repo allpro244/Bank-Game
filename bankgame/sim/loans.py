@@ -398,17 +398,47 @@ def _make_application(state, rng, market_id, thr):
             "small_business": "all business assets; personal guaranty",
             "ag": "crop liens, equipment, and ranch real estate",
             "mortgage": "first lien on primary residence"}[product]
+    banks = state.get("competitors") or []
+    if isinstance(banks, dict):
+        banks = banks.get("banks") or []
+    rivals = [c["name"] for c in banks
+              if c.get("alive") and market_id in (c.get("markets") or [])]
+    if not rivals:
+        rivals = [c["name"] for c in banks if c.get("alive")]
+    rival = rivals[0] if rivals else "a rival across the square"
+    why = {
+        "ag": "local operator, years in this county, deposits likely already here",
+        "ci": "operating company in a market we serve",
+        "cre": "income property in our footprint",
+        "construction": "a project that will book deposits if it opens",
+        "small_business": "a name the square already knows",
+        "mortgage": "a household that may bring the checking account too",
+    }.get(product, "a borrower in a market we serve")
+    dscr_gloss = ("payment coverage is comfortable" if dscr >= 1.3
+                  else "coverage is thin — a bad season hurts"
+                  if dscr >= 1.15 else "they barely clear the payment")
+    ltv_gloss = ("collateral has room" if ltv <= 0.70
+                 else "little room if you have to foreclose" if ltv <= 0.85
+                 else "you are underwriting the person, not the asset")
+    exception = ""
+    tight = state["bank"]["loans"]["standards"].get(product, 2)
+    if tight >= 3 and tier == "C":
+        exception = "\nPolicy exception: standards are tight and this is a C. Price it or pass."
     memo = (
         "CREDIT MEMO — {name}\n"
         "Market: {mkt} | Product: {prod} | Request: ${amt:,}\n"
         "Proposed rate: {rate:.2f}% | Term: {term} months | Risk tier: {tier}\n"
-        "DSCR: {dscr:.2f}x | LTV: {ltv:.0f}% | Collateral: {coll}\n"
+        "DSCR: {dscr:.2f}x ({dscr_g}) | LTV: {ltv:.0f}% ({ltv_g})\n"
+        "Collateral: {coll}\n"
+        "Why them: {why}\n"
+        "If we decline: they walk to {rival}.\n"
         "Local conditions: activity index {act:.2f}, {shock}\n"
-        "Analyst note: {note}"
+        "Analyst note: {note}{exc}"
     ).format(
         name=name, mkt=region["name"], prod=product.upper(),
         amt=amount // 100, rate=rate * 100, term=TERM_M.get(product, 60) or 60,
         tier=tier, dscr=dscr, ltv=ltv * 100, coll=coll,
+        dscr_g=dscr_gloss, ltv_g=ltv_gloss, why=why, rival=rival, exc=exception,
         act=region["local_activity"],
         shock=("ACTIVE SHOCK: %s" % region["shock"]["name"]) if region["shock"] else "no active local shocks",
         note={"A": "Strong borrower; low risk of loss. Priced accordingly.",

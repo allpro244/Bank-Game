@@ -47,6 +47,8 @@ class TestOriginationThrottle(unittest.TestCase):
         app = LN._make_application(state, engine._rng(state, "credit"),
                                    "caprock", 500_000_00)
         self.assertIsNotNone(app)
+        self.assertIn("If we decline", app["memo"])
+        self.assertIn("Why them", app["memo"])
         if app["amount"] > 50_000_00:
             self.assertFalse(app["can_fund"])
             self.assertIn("FUNDING", app["memo"])

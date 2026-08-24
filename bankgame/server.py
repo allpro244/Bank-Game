@@ -15,6 +15,7 @@ from .sim import engine, ledger as L, statements, securities, competitors
 from .sim import deposits as DEP, loans as LN, regulation as REG, funding as FUND
 from .sim import advisor as ADV
 from .sim.newgame import new_game
+from .sim import goals as GOALS
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "web")
 
@@ -42,7 +43,11 @@ class Game:
         curve = [(t, econ["curve"][str(t)]) for t in
                  [0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 7.0, 10.0, 20.0, 30.0]]
         return {
-            "meta": s["meta"], "time": s["time"], "game_over": s["game_over"],
+            "meta": s["meta"],
+            "time": {**s["time"], "display": GOALS.display_date(s)},
+            "game_over": s["game_over"],
+            "goal": GOALS.progress(s),
+            "digest": (s.get("digests") or [None])[-1],
             "audit_alarm": s["audit_alarm"],
             "bank": {
                 "name": bank["name"],
@@ -96,7 +101,8 @@ class Game:
         econ = s["economy"]
 
         if name == "lending":
-            home_rates = competitors.market_rates(s, "caprock")["loan"]
+            home_rates = competitors.market_rates(
+                s, (s.get("meta") or {}).get("home", "caprock"))["loan"]
             return {
                 "spreads": bank["loans"]["spreads"],
                 "standards": bank["loans"]["standards"],
@@ -326,6 +332,7 @@ class Game:
                     "fraud": open_cases,
                 },
                 "peer_avg": ADV.peer_averages(s),
+                "goal": GOALS.progress(s),
             }
 
         if name == "events":
@@ -404,7 +411,12 @@ class Handler(BaseHTTPRequestHandler):
                 if not isinstance(seed, int):
                     seed = int.from_bytes(os.urandom(4), "big")
                 with GAME.lock:
-                    GAME.state = new_game(name, seed)
+                    GAME.state = new_game(
+                        name, seed,
+                        home=str(body.get("home") or "caprock"),
+                        difficulty=str(body.get("difficulty") or "standard"),
+                        goal=str(body.get("goal") or "independent"),
+                        era=str(body.get("era") or "sandbox"))
                     if body.get("guided") is False:
                         from .sim import advisor as _adv
                         _adv.tutorial_off(GAME.state)
