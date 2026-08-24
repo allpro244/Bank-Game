@@ -332,11 +332,11 @@ class Game:
                 "regions": regions_out,
                 "econ_history": econ["history"][-360:],
                 "competitors": [{k: b[k] for k in
-                                 ("name", "strategy", "assets", "equity_ratio",
+                                 ("id", "name", "strategy", "assets", "equity_ratio",
                                   "npa_ratio", "roa", "nim", "efficiency", "alive",
                                   "markets")}
                                 for b in s["competitors"]["banks"]],
-                "peers": [{k: b[k] for k in ("name", "assets", "roa", "nim",
+                "peers": [{k: b[k] for k in ("id", "name", "assets", "roa", "nim",
                                              "efficiency", "npa_ratio", "equity_ratio")}
                           for b in peers],
                 "me": {"roa": me_m.get("roa", 0), "nim": me_m.get("nim", 0),
@@ -361,6 +361,13 @@ class Game:
                 "cash_flow": statements.cash_flow_statement(s),
                 "months": ledger["months"][-24:],
             }
+
+        if name == "rival":
+            bid = (args.get("id") or [""])[0]
+            books = competitors.rival_books(s, bid)
+            if books is None:
+                return {"error": "unknown rival"}
+            return books
 
         if name == "call_report":
             idx = int(args.get("idx", ["-1"])[0])

@@ -1473,11 +1473,12 @@ async function tabMarkets(m) {
     <div class="grid g2" style="margin-top:12px">
     <div class="panel">
       <h3>Rival banks</h3>
+      <div class="helptip">Click any bank to open its full call-report books — the same shape as your Reports tab.</div>
       <table><tr><th>Bank</th><th>Strategy</th><th class="r">Assets</th>
         <th class="r">${dt('cet1', MODE === 'owner' ? 'Capital' : 'Capital')}</th>
         <th class="r">${dt('npa')}</th><th class="r">${dt('roa')}</th></tr>
-      ${d.competitors.map(b => `<tr class="${b.alive ? '' : 'sub'}">
-        <td>${esc(b.name)}${b.alive ? '' : ' †'}</td><td>${esc(b.strategy.replace('_', ' '))}</td>
+      ${d.competitors.map(b => `<tr class="click ${b.alive ? '' : 'sub'}" onclick="openRival(${jattr(b.id)})">
+        <td>${esc(b.name)}${b.alive ? '' : ' †'}</td><td>${esc(rivalStratLabel(b.strategy))}</td>
         <td class="r">${fmc(b.assets)}</td>
         <td class="r ${b.equity_ratio < 0.06 ? 'neg' : ''}">${pct(b.equity_ratio, 1)}</td>
         <td class="r ${b.npa_ratio > 0.04 ? 'neg' : ''}">${pct(b.npa_ratio, 1)}</td>
@@ -1494,7 +1495,8 @@ async function tabMarkets(m) {
         <td class="r">${fmc(d.me.assets)}</td><td class="r">${pct(d.me.roa)}</td>
         <td class="r">${pct(d.me.nim)}</td><td class="r">${pct(d.me.efficiency, 0)}</td>
         <td class="r">${pct(d.me.npa_ratio)}</td></tr>
-      ${d.peers.map(b => `<tr><td>${esc(b.name)}</td><td class="r">${fmc(b.assets)}</td>
+      ${d.peers.map(b => `<tr class="click" onclick="openRival(${jattr(b.id)})">
+        <td>${esc(b.name)}</td><td class="r">${fmc(b.assets)}</td>
         <td class="r">${pct(b.roa)}</td><td class="r">${pct(b.nim)}</td>
         <td class="r">${pct(b.efficiency, 0)}</td><td class="r">${pct(b.npa_ratio)}</td></tr>`).join('')}
       </table>
@@ -1511,6 +1513,198 @@ async function tabMarkets(m) {
     { name: 'unemployment', color: '#e06060', data: h.map(x => ({ x: x.m, y: x.unemp })) },
     { name: 'inflation', color: '#e0b050', data: h.map(x => ({ x: x.m, y: x.infl })) },
   ], { title: 'Macro', xfmt: v => 'm' + Math.round(v), zero: true });
+}
+
+/* ---------------- Rival call-report books ---------------- */
+const RIVAL_STRAT = {
+  rate_leader: { b: 'Rate leader', o: 'Pays up for deposits' },
+  relationship: { b: 'Relationship', o: 'Knows its customers' },
+  aggressive_lender: { b: 'Aggressive lender', o: 'Grows loans fast' },
+  conservative: { b: 'Conservative', o: 'Fortress / cautious' },
+  roll_up: { b: 'Roll-up', o: 'Buys other banks' },
+  digital: { b: 'Digital', o: 'Online / few branches' },
+};
+const RIVAL_LINE = {
+  'Cash and due from banks': { b: 'Cash and due from banks', o: 'Cash in the vault' },
+  'Interest-bearing balances at Fed': { b: 'Interest-bearing balances at Fed', o: 'Cash at the Fed' },
+  'Fed funds sold': { b: 'Fed funds sold', o: 'Overnight loans to other banks' },
+  'Securities available-for-sale (fair value)': { b: 'Securities available-for-sale (fair value)', o: 'Sellable bonds' },
+  'Securities held-to-maturity (amortized cost)': { b: 'Securities held-to-maturity (amortized cost)', o: 'Locked-away bonds' },
+  'Loans, gross': { b: 'Loans, gross', o: 'Loans outstanding' },
+  '  less: allowance for credit losses': { b: '  less: allowance for credit losses', o: '  less: loss reserve' },
+  'Loans, net': { b: 'Loans, net', o: 'Loans after reserve' },
+  'Premises and equipment': { b: 'Premises and equipment', o: 'Buildings and equipment' },
+  'Other real estate owned': { b: 'Other real estate owned', o: 'Foreclosed property' },
+  'Other assets': { b: 'Other assets', o: 'Everything else they own' },
+  'Noninterest-bearing demand deposits': { b: 'Noninterest-bearing demand deposits', o: 'Free checking' },
+  'Interest checking (NOW)': { b: 'Interest checking (NOW)', o: 'Interest checking' },
+  'Savings deposits': { b: 'Savings deposits', o: 'Savings' },
+  'Money market deposits': { b: 'Money market deposits', o: 'Money market' },
+  'Time deposits (CDs)': { b: 'Time deposits (CDs)', o: 'CDs' },
+  'Brokered deposits': { b: 'Brokered deposits', o: 'Bought (brokered) deposits' },
+  'Total deposits': { b: 'Total deposits', o: 'Total deposits' },
+  'FHLB advances': { b: 'FHLB advances', o: 'FHLB borrowings' },
+  'Other liabilities': { b: 'Other liabilities', o: 'Other amounts they owe' },
+  'Common stock and surplus': { b: 'Common stock and surplus', o: "Owners' capital" },
+  'Retained earnings': { b: 'Retained earnings', o: 'Profits kept in the bank' },
+  'Accumulated other comprehensive income': { b: 'Accumulated other comprehensive income', o: 'Paper gain/loss on bonds' },
+  'Interest income': { b: 'Interest income', o: 'What loans and bonds earned' },
+  'Interest expense': { b: 'Interest expense', o: 'What they paid depositors' },
+  'NET INTEREST INCOME': { b: 'NET INTEREST INCOME', o: 'LENDING MARGIN' },
+  'Provision for credit losses': { b: 'Provision for credit losses', o: 'Money set aside for bad loans' },
+  'Noninterest income': { b: 'Noninterest income', o: 'Fees' },
+  'Securities gains (losses)': { b: 'Securities gains (losses)', o: 'Bond sale gains (losses)' },
+  'Noninterest expense': { b: 'Noninterest expense', o: 'Operating costs' },
+  'PRETAX INCOME': { b: 'PRETAX INCOME', o: 'PROFIT BEFORE TAX' },
+  'Income tax': { b: 'Income tax', o: 'Taxes' },
+  'NET INCOME': { b: 'NET INCOME', o: 'PROFIT' },
+  'Interest income — loans': { b: 'Interest income — loans', o: 'Interest from loans' },
+  'Interest income — securities': { b: 'Interest income — securities', o: 'Interest from bonds' },
+  'Interest income — other': { b: 'Interest income — other', o: 'Other interest earned' },
+  'Interest expense — deposits': { b: 'Interest expense — deposits', o: 'Interest paid on deposits' },
+  'Interest expense — wholesale': { b: 'Interest expense — wholesale', o: 'Interest on borrowed money' },
+  'Service charges on deposits': { b: 'Service charges on deposits', o: 'Account fees' },
+  'Card interchange': { b: 'Card interchange', o: 'Card swipe income' },
+  'Salaries and benefits': { b: 'Salaries and benefits', o: 'Pay and benefits' },
+  'Occupancy and equipment': { b: 'Occupancy and equipment', o: 'Buildings and gear' },
+  'Technology': { b: 'Technology', o: 'Technology' },
+  'Marketing': { b: 'Marketing', o: 'Marketing' },
+  'FDIC assessment': { b: 'FDIC assessment', o: 'FDIC insurance bill' },
+  'Other expense': { b: 'Other expense', o: 'Other costs' },
+};
+const LOAN_PROD = {
+  auto: 'Auto', mortgage: 'Mortgage', heloc: 'HELOC', credit_card: 'Card',
+  small_business: 'Small business', ci: 'C&I', cre: 'CRE',
+  construction: 'Construction', ag: 'Ag', sba: 'SBA',
+};
+const DEP_PROD = {
+  checking: 'Checking', checking_int: 'NOW', savings: 'Savings',
+  money_market: 'Money market', time: 'CDs', brokered: 'Brokered',
+};
+
+function rivalStratLabel(strat) {
+  const e = RIVAL_STRAT[strat];
+  if (!e) return String(strat || '').replace(/_/g, ' ');
+  return MODE === 'owner' ? e.o : e.b;
+}
+function rivalLine(label) {
+  const e = RIVAL_LINE[label];
+  if (!e) return esc(label);
+  return esc(MODE === 'owner' ? e.o : e.b);
+}
+
+async function openRival(id) {
+  try {
+    const d = await api('/api/section?name=rival&id=' + encodeURIComponent(id));
+    showRivalBooks(d);
+  } catch (e) { toast(String(e), true); }
+}
+
+let RIVAL_OPEN = null;
+function rivalNeighbor(dir) {
+  const d = RIVAL_OPEN;
+  if (!d) return;
+  const sibs = d.siblings || [];
+  const i = sibs.findIndex(x => x.id === d.id);
+  if (i < 0 || !sibs.length) return;
+  const n = sibs[(i + dir + sibs.length) % sibs.length];
+  if (n) openRival(n.id);
+}
+
+function showRivalBooks(d) {
+  RIVAL_OPEN = d;
+  const bs = d.balance_sheet;
+  const isRow = (label, v, strong) =>
+    `<tr class="${strong ? 'total' : ''}"><td>${rivalLine(label)}</td><td class="r ${cls(v)}">${fm(v)}</td></tr>`;
+  const status = d.alive
+    ? ''
+    : (MODE === 'owner'
+      ? ' <span class="neg">— closed by regulators</span>'
+      : ' <span class="neg">— CLOSED</span>');
+  const towns = (d.markets || []).map(m => m.name).join(', ') || '—';
+  const depRates = (d.posted_rates && d.posted_rates.deposit) || {};
+  const loanRates = (d.posted_rates && d.posted_rates.loan) || {};
+  const r = d.ratios || {};
+  const q = d.quality || {};
+  const loanMix = Object.entries(d.mix && d.mix.loans || {})
+    .filter(([, v]) => v)
+    .sort((a, b) => b[1] - a[1]);
+  const depMix = Object.entries(d.mix && d.mix.deposits || {})
+    .filter(([, v]) => v)
+    .sort((a, b) => b[1] - a[1]);
+  const html = `
+    <div class="sub" style="margin-bottom:8px">
+      ${esc(rivalStratLabel(d.strategy))}
+      · ${esc(towns)}
+      · ~${d.branches_est || 0} ${MODE === 'owner' ? 'branches (size estimate)' : 'branches est.'}
+      ${status}
+    </div>
+    <div class="cards">
+      ${card(dt('roa'), pct(r.roa), 'TTM profit / assets')}
+      ${card(dt('nim'), pct(r.nim), MODE === 'owner' ? 'lending margin' : 'NII / assets')}
+      ${card(dt('eff'), pct(r.efficiency, 0), 'opex / revenue')}
+      ${card(dt('npa'), pct(r.npa_ratio), fm(q.npa) + ' not paying')}
+      ${card(dt('cet1'), pct(r.cet1, 1), dt('leverage') + ' ' + pct(r.leverage, 1))}
+      ${card(dt('ldr'), r.ldr != null ? r.ldr.toFixed(2) : '—', dt('uninsured') + ' ' + pct(r.uninsured, 0))}
+    </div>
+    <div class="grid g2">
+    <div class="panel tight">
+      <h3>${MODE === 'owner' ? 'What they own and owe' : 'Balance sheet'}</h3>
+      <table>
+        <tr class="section"><td colspan="2">${MODE === 'owner' ? 'What they own' : 'Assets'}</td></tr>
+        ${bs.assets.map(([l, v]) => isRow(l, v)).join('')}
+        ${isRow('TOTAL ASSETS', bs.total_assets, true)}
+        <tr class="section"><td colspan="2">${MODE === 'owner' ? 'What they owe' : 'Liabilities'}</td></tr>
+        ${bs.liabilities.map(([l, v]) => isRow(l, v, l === 'Total deposits')).join('')}
+        ${isRow('TOTAL LIABILITIES', bs.total_liabilities, true)}
+        <tr class="section"><td colspan="2">${MODE === 'owner' ? "Owners' money" : 'Equity'}</td></tr>
+        ${bs.equity.map(([l, v]) => isRow(l, v)).join('')}
+        ${isRow('TOTAL EQUITY', bs.total_equity, true)}
+      </table>
+    </div>
+    <div class="panel tight">
+      <h3>${MODE === 'owner' ? 'Last twelve months' : 'Income statement (TTM)'}</h3>
+      <table>
+        ${d.income_ttm.lines.map(([l, v]) => isRow(l, v, l === l.toUpperCase())).join('')}
+      </table>
+      <h3>${MODE === 'owner' ? 'Line detail' : 'P&L line detail'}</h3>
+      <table>${d.income_ttm.detail.filter(x => x[1] !== 0).map(([l, v]) =>
+        `<tr><td>${rivalLine(l)}</td><td class="r">${fm(v)}</td></tr>`).join('')}</table>
+    </div>
+    </div>
+    <div class="grid g2" style="margin-top:10px">
+    <div class="panel tight">
+      <h3>${MODE === 'owner' ? 'Loan book' : 'Loan mix'}</h3>
+      <table>${loanMix.map(([k, v]) =>
+        `<tr><td>${esc(LOAN_PROD[k] || k)}</td><td class="r">${fmc(v)}</td></tr>`).join('')}</table>
+    </div>
+    <div class="panel tight">
+      <h3>${MODE === 'owner' ? 'Deposit book' : 'Deposit mix'}</h3>
+      <table>${depMix.map(([k, v]) =>
+        `<tr><td>${esc(DEP_PROD[k] || k)}</td><td class="r">${fmc(v)}</td></tr>`).join('')}
+        <tr><td>${MODE === 'owner' ? 'Uninsured (est.)' : 'Uninsured (est.)'}</td>
+          <td class="r">${fmc(r.uninsured_dollars)}</td></tr></table>
+    </div>
+    </div>
+    <div class="grid g2" style="margin-top:10px">
+    <div class="panel tight">
+      <h3>${MODE === 'owner' ? 'What they pay for money' : 'Posted deposit rates'}</h3>
+      <table>${[['checking','Checking'],['savings','Savings'],['money_market','Money market'],
+        ['cd_1y','1-year CD'],['cd_5y','5-year CD']].map(([k, lab]) =>
+        `<tr><td>${esc(lab)}</td><td class="r">${pct(depRates[k])}</td></tr>`).join('')}</table>
+    </div>
+    <div class="panel tight">
+      <h3>${MODE === 'owner' ? 'What they charge' : 'Posted loan rates'}</h3>
+      <table>${[['mortgage','Mortgage'],['auto','Auto'],['ci','C&I'],['cre','CRE'],
+        ['small_business','Small business'],['ag','Ag']].map(([k, lab]) =>
+        `<tr><td>${esc(lab)}</td><td class="r">${pct(loanRates[k])}</td></tr>`).join('')}</table>
+    </div>
+    </div>
+    <div class="helptip" style="margin-top:10px">${esc(d.note || '')}</div>`;
+  const prev = (d.siblings || []).length > 1
+    ? [['← Prev', 'rivalNeighbor(-1)'], ['Next →', 'rivalNeighbor(1)']]
+    : [];
+  showHtml((d.name || 'Rival') + (d.alive ? '' : ' †'), html, prev, 'books');
 }
 
 /* ---------------- Reports ---------------- */
