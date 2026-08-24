@@ -1391,12 +1391,19 @@ function showText(title, text, buttons) {
   box.classList.remove('hidden');
   const btns = (buttons || []).map(([label, code, klass]) =>
     `<button class="${klass || ''}" onclick="${code}">${label}</button>`).join('');
-  box.innerHTML = `<div class="modalbox">
-    <h2>${title}</h2><pre>${text}</pre>
-    <div class="btnrow">${btns}<button onclick="closeText()">Close</button></div>
+  box.innerHTML = `<div class="modalbox" onclick="event.stopPropagation()">
+    <h2>${esc(title)}<button class="modal-x" onclick="closeText()" title="Close (Esc)">×</button></h2>
+    <pre>${text}</pre>
+    <div class="btnrow">${btns}<button class="primary" onclick="closeText()">Close</button></div>
   </div>`;
+  box.onclick = () => closeText();
 }
-function closeText() { $('textmodal').classList.add('hidden'); $('textmodal').innerHTML = ''; }
+function closeText() {
+  const box = $('textmodal');
+  box.classList.add('hidden');
+  box.innerHTML = '';
+  box.onclick = null;
+}
 
 function showExam(date, composite, text) {
   const tone = composite <= 2 ? 'they are calm'
@@ -1480,8 +1487,20 @@ async function rollback(day) {
 }
 
 /* ---------------- keyboard ---------------- */
+function modalOpen() {
+  const t = $('textmodal'), ev = $('eventmodal');
+  return (t && !t.classList.contains('hidden')) || (ev && !ev.classList.contains('hidden'));
+}
+
 document.addEventListener('keydown', e => {
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+  const textOpen = $('textmodal') && !$('textmodal').classList.contains('hidden');
+  if ((e.key === 'Escape' || e.key === 'Esc') && textOpen) {
+    e.preventDefault();
+    closeText();
+    return;
+  }
+  if (modalOpen()) return;
   if (e.key === ' ') { e.preventDefault(); advance('day'); }
   else if (e.key === 'w') advance('week');
   else if (e.key === 'm') advance('month');
