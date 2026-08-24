@@ -112,7 +112,7 @@ def issue_brokered(state, amount, term_months):
         return "minimum brokered issuance $250,000"
     room = brokered_room(state)
     if amount > room:
-        return "brokered book would exceed 30% of core deposits ($%s room)" % \
+        return "brokered book would exceed 30%% of core deposits ($%s room)" % \
             f"{room // 100:,}"
     f = bank["funding"]
     rate = round(yield_at(state["economy"], max(0.25, term_months / 12.0)) + 0.0040, 5)
