@@ -53,9 +53,17 @@ class Store:
             "FROM saves s ORDER BY s.last_played DESC")
         out = []
         for name, seed, created, played, day, date in cur.fetchall():
-            out.append({"name": name, "seed": seed, "created": created,
-                        "last_played": played, "day_index": day or 0,
-                        "date": date or ""})
+            card = {"name": name, "seed": seed, "created": created,
+                    "last_played": played, "day_index": day or 0,
+                    "date": date or ""}
+            st = self.load(name)
+            if st:
+                try:
+                    from .sim.goals import summarize_save
+                    card.update(summarize_save(st))
+                except Exception:
+                    pass
+            out.append(card)
         return out
 
     def create_save(self, name, seed):

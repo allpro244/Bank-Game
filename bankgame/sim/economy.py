@@ -91,7 +91,7 @@ def yield_at(econ, tenor_years):
     return c[str(TENORS[-1])]
 
 
-def step_month(econ, rng):
+def step_month(econ, rng, date=None, era="sandbox"):
     """Advance the macro economy one month."""
     e = econ
     e["months"] += 1
@@ -210,8 +210,68 @@ def step_month(econ, rng):
     # --- money market fund yield (deposit competitor) ---
     e["mmf_rate"] = round(max(0.0005, e["fed_funds"] - 0.0025), 5)
 
+    if era == "historical" and date:
+        _nudge_historical(e, date)
+
     e["curve"] = _build_curve(e)
     _record(e)
+
+
+# Soft era landmarks. Organic cycle still runs; we blend toward these.
+# (year, month) → fed_funds, credit_stress, credit_boom, output_gap, inflation
+_HIST_MARKS = (
+    (2000, 1, 0.0550, 0.06, 0.30, 0.8, 2.7),
+    (2001, 1, 0.0600, 0.10, 0.25, 0.2, 3.4),
+    (2001, 4, 0.0450, 0.22, 0.15, -1.2, 3.0),   # dot-com bust / 2001 cut
+    (2002, 1, 0.0175, 0.18, 0.10, -1.6, 1.6),
+    (2003, 6, 0.0100, 0.08, 0.20, 0.4, 2.3),
+    (2004, 6, 0.0125, 0.06, 0.45, 1.2, 3.0),
+    (2005, 6, 0.0325, 0.07, 0.70, 1.4, 3.2),
+    (2006, 6, 0.0525, 0.10, 0.95, 1.1, 4.0),   # boom peak
+    (2007, 8, 0.0525, 0.28, 0.70, 0.2, 2.4),
+    (2008, 9, 0.0200, 0.75, 0.15, -3.5, 4.9),  # bust
+    (2009, 3, 0.0025, 0.70, 0.05, -6.0, -0.4),
+    (2011, 6, 0.0025, 0.20, 0.15, -1.2, 3.6),
+    (2015, 12, 0.0050, 0.08, 0.30, 0.6, 0.7),
+    (2018, 12, 0.0225, 0.08, 0.40, 1.0, 2.2),
+    (2020, 4, 0.0025, 0.55, 0.10, -8.0, 0.3),  # COVID
+    (2021, 6, 0.0010, 0.12, 0.45, 2.2, 5.4),
+    (2022, 6, 0.0175, 0.14, 0.40, 1.4, 9.1),
+    (2023, 3, 0.0475, 0.22, 0.30, 0.6, 5.0),   # SVB-era hike
+    (2024, 6, 0.0530, 0.12, 0.35, 0.4, 3.0),
+)
+
+
+def _hist_lerp(date):
+    y, m = int(date[:4]), int(date[5:7])
+    t = y + (m - 1) / 12.0
+    marks = [(my + (mm - 1) / 12.0, ff, st, boom, gap, inf)
+             for my, mm, ff, st, boom, gap, inf in _HIST_MARKS]
+    if t <= marks[0][0]:
+        return marks[0][1:]
+    if t >= marks[-1][0]:
+        return marks[-1][1:]
+    for i in range(len(marks) - 1):
+        a, b = marks[i], marks[i + 1]
+        if a[0] <= t <= b[0]:
+            f = (t - a[0]) / max(0.01, b[0] - a[0])
+            return tuple(a[j] + f * (b[j] - a[j]) for j in range(1, 6))
+    return marks[-1][1:]
+
+
+def _nudge_historical(e, date):
+    """Blend the organic path toward a recognizable 2000–2024 shape."""
+    ff, stress, boom, gap, infl = _hist_lerp(date)
+    blend = 0.18
+    e["fed_funds"] = round(max(0.0, e["fed_funds"] * (1 - blend) + ff * blend), 6)
+    e["credit_stress"] = max(0.02, min(1.0, e["credit_stress"] * (1 - blend) + stress * blend))
+    e["credit_boom"] = max(0.0, min(1.6, e["credit_boom"] * (1 - blend) + boom * blend))
+    e["output_gap"] = max(-9.0, min(6.0, e["output_gap"] * (1 - blend) + gap * blend))
+    e["inflation"] = round(max(-2.0, min(16.0, e["inflation"] * (1 - blend) + infl * blend)), 2)
+    e["recession"] = e["output_gap"] < -1.0
+    if stress > 0.45 and e.get("in_bust", 0) == 0:
+        e["in_bust"] = 4
+        e["bust_severity"] = max(e.get("bust_severity", 0.4), stress)
 
 
 def _commodity(e, rng, key, mu, theta, sigma, jump_p, jump_lo, jump_hi):

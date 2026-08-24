@@ -2,8 +2,10 @@
 
 Funding stack: core deposits (deposits.py), brokered CDs, FHLB advances,
 fed funds purchased, discount window, subordinated debt. Overnight
-borrowing is automatic when cash goes negative -- first fed funds, then
-the discount window (which regulators notice).
+borrowing: redeem your own fed-funds-sold first; then, depending on
+`overnight_policy` (`ask` or `auto`), either stop the clock or cover
+with FHLB / fed funds purchased / the discount window (which
+regulators notice).
 
 Capital: common raises, preferred issuance, dividends, buybacks.
 """
@@ -20,6 +22,7 @@ def new_funding():
         "next_id": 1,
         "discount_window_uses": 0,
         "ff_purchased_rate": 0.0,
+        "overnight_policy": "ask",   # ask | auto
     }
 
 
@@ -205,11 +208,17 @@ def step_month(state, rng):
 
 def manage_overnight(state):
     """Called daily AFTER all flows: cover negative cash with overnight
-    borrowings; sweep big surpluses into fed funds sold."""
+    borrowings; sweep big surpluses into fed funds sold.
+
+    Policy `ask` (default): after using your own cash/FFS, any window
+    draw is a blocking event. Policy `auto`: FHLB, then FF purchased,
+    then window — every window use is still logged.
+    """
     bank = state["bank"]
     ledger = bank["ledger"]
     date = state["time"]["date"]
     events = []
+    policy = bank["funding"].get("overnight_policy", "ask")
 
     # first: repay overnight borrowings with any available cash
     cash = ledger["balances"]["1000"]
@@ -225,15 +234,27 @@ def manage_overnight(state):
     target_cash = _target_cash(state)
     if cash < 0:
         need = -cash + target_cash // 2
-        # 1) draw down fed funds sold
+        # 1) draw down fed funds sold (your own money — always automatic)
         ffs = ledger["balances"]["1100"]
         if ffs > 0:
             take = min(ffs, need)
             L.post(ledger, date, "Fed funds sold redeemed",
                    [["1000", take, 0], ["1100", 0, take]], tag="fund")
             need -= take
-        # 2) fed funds purchased (limited by counterparty confidence)
-        if need > 0:
+        used_window = 0
+        used_fhlb = 0
+        # 2) FHLB / fed-funds purchased: auto covers; ask leaves the hole
+        #    for the player (window is never silent).
+        if policy == "auto" and need >= 100_000_00:
+            cap = fhlb_capacity(state)
+            take = min(need, cap)
+            take = (take // 10_000_00) * 10_000_00
+            if take >= 100_000_00:
+                res = take_fhlb(state, take, 1)
+                if not isinstance(res, str):
+                    used_fhlb = take
+                    need -= take
+        if policy == "auto" and need > 0:
             limit = _ff_purchase_limit(state)
             already = -ledger["balances"]["2110"]
             take = max(0, min(need, limit - already))
@@ -241,17 +262,39 @@ def manage_overnight(state):
                 L.post(ledger, date, "Fed funds purchased (overnight)",
                        [["1000", take, 0], ["2110", 0, take]], tag="fund")
                 need -= take
-        # 3) discount window
-        if need > 0:
+        if need > 0 and policy != "auto":
+            already = any(e.get("type") == "overnight_shortfall"
+                          for e in state["events"]["pending"])
+            if not already:
+                events.append({
+                    "type": "overnight_shortfall",
+                    "blocking": True,
+                    "need": need,
+                    "title": "Overnight cash shortfall",
+                    "text": ("We are short $%s overnight after using our own cash "
+                             "and fed-funds-sold. The clock stops so you can choose: "
+                             "draw FHLB, borrow fed funds, use the discount window, "
+                             "or wait and shrink next month's originations.\n\n"
+                             "The window is not drawn until you pick it. Examiners "
+                             "count every use."
+                             % f"{need // 100:,}"),
+                    "choices": ["fhlb", "fed_funds", "window", "wait"],
+                })
+        elif need > 0:
+            # auto: last resort — books stay non-negative, every use is logged
             L.post(ledger, date, "DISCOUNT WINDOW borrowing",
                    [["1000", need, 0], ["2120", 0, need]], tag="fund")
             state["bank"]["funding"]["discount_window_uses"] += 1
-            if state["bank"]["funding"]["discount_window_uses"] in (1, 5, 15):
-                events.append({"type": "liquidity", "blocking": False,
-                               "title": "Discount window used",
-                               "text": "The bank borrowed at the Fed's discount window to cover "
-                                       "a cash shortfall. Occasional use is fine; habitual use "
-                                       "draws examiner attention and signals funding stress."})
+            used_window = need
+            events.append({
+                "type": "liquidity",
+                "blocking": False,
+                "title": "Discount window used",
+                "text": ("Auto overnight policy borrowed at the Fed's discount "
+                         "window to cover a cash shortfall ($%s). Lifetime "
+                         "window uses: %d."
+                         % (f"{used_window // 100:,}",
+                            state["bank"]["funding"]["discount_window_uses"]))})
     else:
         surplus = cash - target_cash
         if surplus > 500_000_00:

@@ -5,6 +5,7 @@ let SUM = null;          // latest /api/summary
 let TAB = MODE === 'owner' ? 'desk' : 'dashboard';
 let SEC = {};            // section cache
 let BUSY = false;
+const REVEALED = new Set();   // tabs opened this session (deep links stay visible)
 
 /* ---------------- glossary & owner-mode labels ----------------
    Every entry: b = banker label, o = plain-English label, g = tooltip.
@@ -123,6 +124,14 @@ function fmc(cents) {          // compact
   return s + a.toFixed(0);
 }
 function pct(v, dp) { return v == null ? '—' : (v * 100).toFixed(dp == null ? 2 : dp) + '%'; }
+function durationTrapCopy() {
+  const era = (SUM.meta || {}).era;
+  const y = parseInt(((SUM.time || {}).date || '2000').slice(0, 4), 10);
+  if (era === 'historical' && y >= 2015) {
+    return 'This is the Silicon Valley Bank dial. If unrealized losses approach your capital and your uninsured depositors notice, the run starts.';
+  }
+  return 'This is the duration trap. Long bonds bought cheap, then rates rise: paper losses vs capital. Uninsured depositors who notice start the run.';
+}
 function cls(v) { return v > 0 ? 'pos' : v < 0 ? 'neg' : ''; }
 function moneyIn(id) {         // dollars input -> cents
   const v = parseFloat($(id).value);
@@ -180,7 +189,8 @@ async function advance(unit) {
     await refresh();
     const evs = r.result.events || [];
     const blocked = evs.some(e => e.blocking);
-    if (blocked) toast('The clock stopped: something needs your attention.');
+    if (r.result.inbox) toast('The clock stopped: something on Your Desk needs a decision first.');
+    else if (blocked) toast('The clock stopped: something needs your attention.');
   } catch (e) { toast(String(e), true); }
   finally { BUSY = false; }
 }
@@ -193,6 +203,7 @@ async function refresh() {
   $('topbar').classList.remove('hidden');
   $('layout').classList.remove('hidden');
   renderTopbar();
+  renderFranchise();
   renderNav();
   await renderTab();
   renderEventModal();
@@ -201,7 +212,7 @@ async function refresh() {
 function renderTopbar() {
   const b = SUM.bank;
   $('tb-name').textContent = b.name;
-  $('tb-date').textContent = SUM.time.date;
+  $('tb-date').textContent = SUM.time.display || SUM.time.date;
   $('tb-assets').textContent = fmc(b.assets);
   $('tb-cash').textContent = fmc(b.cash);
   $('tb-equity').textContent = fmc(b.equity);
@@ -210,9 +221,34 @@ function renderTopbar() {
   ni.className = cls(b.ni_mtd);
   const reg = SUM.regulation;
   const pcaColor = reg.pca === 'well' ? 'g' : reg.pca === 'adequate' ? 'y' : 'r';
+  const pcaOwner = {well: 'Solid capital', adequate: 'Adequate',
+    under: 'Undercapitalized', significant: 'Trouble', critical: 'Critical'};
+  const pcaLabel = MODE === 'owner' ? (pcaOwner[reg.pca] || reg.pca)
+                                   : reg.pca.toUpperCase();
+  const camelsLabel = MODE === 'owner'
+    ? ('Report card ' + reg.camels.composite)
+    : ('CAMELS ' + reg.camels.composite);
+  const examMo = reg.months_to_exam;
+  const examLabel = examMo == null ? '' :
+    `<span class="pill ${examMo <= 3 ? 'y' : 'b'}">${MODE === 'owner' ? 'Examiners' : 'Exam'} ${examMo} mo</span>`;
+  const dw = reg.dw_uses || 0;
+  const dwLabel = dw ? `<span class="pill ${dw >= 5 ? 'r' : 'y'}">${MODE === 'owner' ? 'Fed window' : 'Window'} ×${dw}</span>` : '';
   $('tb-pca').innerHTML =
-    `<span class="pill ${pcaColor}">${esc(reg.pca.toUpperCase())}</span> ` +
-    `<span class="pill ${reg.camels.composite <= 2 ? 'g' : reg.camels.composite === 3 ? 'y' : 'r'}">CAMELS ${reg.camels.composite}</span>`;
+    `<span class="pill ${pcaColor}">${esc(pcaLabel)}</span> ` +
+    `<span class="pill ${reg.camels.composite <= 2 ? 'g' : reg.camels.composite === 3 ? 'y' : 'r'}">${esc(camelsLabel)}</span> ` +
+    examLabel + ' ' + dwLabel;
+}
+
+function renderFranchise() {
+  const el = $('franchise');
+  if (!el) return;
+  const f = SUM.franchise;
+  if (!f) { el.innerHTML = ''; return; }
+  el.innerHTML =
+    `<span class="fbit"><b>${esc(f.home)}</b></span>` +
+    `<span class="fbit">${esc(f.people)}</span>` +
+    `<span class="fbit">${esc(f.cash)}</span>` +
+    `<span class="fbit">${esc(f.exam)}</span>`;
 }
 
 const TABS = [
@@ -223,6 +259,23 @@ const TABS = [
   ['events', 'Events'],
 ];
 
+function tabUnlocked(id) {
+  if (MODE === 'banker') return true;
+  if (REVEALED.has(id) || TAB === id) return true;
+  const always = ['desk', 'deposits', 'lending', 'treasury', 'ops'];
+  if (always.includes(id)) return true;
+  const u = SUM.unlock || {};
+  const months = u.months_closed || 0;
+  if (id === 'dashboard') return months >= 1;
+  if (id === 'risk') return (u.months_to_exam != null && u.months_to_exam <= 6)
+    || u.fraud_open || u.orders;
+  if (id === 'markets') return (u.branches || 0) >= 2 || months >= 3;
+  if (id === 'reports') return months >= 3;
+  if (id === 'ledger') return u.audit || months >= 1;
+  if (id === 'events') return (u.pending || 0) > 0 || (u.log_len || 0) > 8;
+  return true;
+}
+
 function renderNav() {
   const counts = SUM.counts || {};
   const badges = {
@@ -232,18 +285,20 @@ function renderNav() {
     risk: counts.fraud_cases || 0,
     events: (SUM.pending || []).length,
   };
-  $('nav').innerHTML = TABS.map(([id, label]) =>
+  $('nav').innerHTML = TABS.filter(([id]) => tabUnlocked(id)).map(([id, label]) =>
     `<div class="tab ${TAB === id ? 'active' : ''}" onclick="switchTab('${id}')">
        <span>${label}</span>${badges[id] ? `<span class="badge">${badges[id]}</span>` : ''}
      </div>`).join('') +
     `<div style="flex:1;min-height:12px"></div>
      <div class="tab" onclick="showGlossary()"><span>📖 Glossary</span></div>
      <div class="tab" onclick="toggleMode()" title="Owner view: plain language. Banker view: full jargon. Same game.">
-       <span>⇄ ${MODE === 'owner' ? 'Owner view' : 'Banker view'}</span></div>`;
+       <span>⇄ ${MODE === 'owner' ? 'Owner view' : 'Banker view'}</span></div>
+     <div class="helptip" style="padding:8px 14px;line-height:1.35">Keys: space day · w week · m month · q quarter. Week/month/quarter stop if Your Desk has a decision.</div>`;
 }
 
 async function switchTab(id) {
   TAB = id;
+  REVEALED.add(id);
   renderNav();
   await renderTab();
 }
@@ -275,14 +330,30 @@ async function renderTab() {
 
 function renderGameOver(m) {
   const g = SUM.game_over;
+  const kind = g.kind || 'seized';
+  const head = kind === 'seized' ? 'THE BANK HAS FAILED'
+    : kind === 'retired' ? 'YOU STEPPED AWAY'
+    : 'THE BANK WAS SOLD';
+  const tone = kind === 'seized' ? 'red' : 'amber';
+  const goal = g.goal || {};
+  const notes = (g.notes || []).map(n => `<li>${esc(n)}</li>`).join('');
   m.innerHTML = `
-    <div class="banner ${g.kind === 'sold' ? 'amber' : 'red'}" style="font-size:16px">
-      ${g.kind === 'seized' ? 'THE BANK HAS FAILED' : 'THE BANK WAS SOLD'}
-    </div>
-    <div class="panel"><p>${esc(g.summary)}</p>
-      <p class="sub" style="margin-top:8px">Final assets: ${fm(g.assets)} · ${g.years} years played · ${esc(g.date)}</p>
+    <div class="banner ${tone}" style="font-size:16px">${head}</div>
+    <div class="panel">
+      <p>${esc(g.summary)}</p>
+      <p class="sub" style="margin-top:8px">${esc(g.display_date || g.date)} · ${g.years} years · final assets ${fm(g.assets)}</p>
+      ${goal.label ? `<h3>Goal — ${esc(goal.label)}</h3>
+        <p>${goal.won ? 'Complete.' : (goal.failed ? 'Not this time.' : esc(goal.text || ''))}</p>` : ''}
+      ${g.exam ? `<h3>Last report card</h3><p>${esc(g.exam)}</p>` : ''}
+      <div class="kv" style="margin-top:8px">
+        <span class="k">Peak loans vs deposits</span><span class="v">${g.peak_ldr != null ? g.peak_ldr.toFixed(2) : '—'}</span>
+        <span class="k">Discount window uses</span><span class="v">${g.window_uses != null ? g.window_uses : '—'}</span>
+        <span class="k">Paper losses vs core capital</span><span class="v">${g.unreal_vs_cet1 != null ? pct(g.unreal_vs_cet1, 0) : '—'}</span>
+      </div>
+      ${notes ? `<h3>What mattered</h3><ul class="sub">${notes}</ul>` : ''}
+      ${g.earlier ? `<p style="margin-top:10px">${esc(g.earlier)}</p>` : ''}
       <div class="btnrow" style="margin-top:12px">
-        <button class="primary" onclick="showSaves()">Back to saves</button>
+        <button class="primary" onclick="showSaves()">Back to the title screen</button>
       </div>
     </div>`;
 }
@@ -296,13 +367,22 @@ async function tabDesk(m) {
   const nothingPending = !inbox.events.length && !inbox.loans.length && !inbox.fraud.length;
   const allGreen = g.every(x => x.status === 'g');
 
+  const goal = d.goal || SUM.goal;
+  const goalBar = goal ? `<div class="panel tight" style="margin-bottom:10px">
+      <b>${esc(goal.label)}</b>
+      <span class="sub"> — ${esc(goal.text)}</span>
+      <div style="margin-top:6px;background:#0a0e13;border-radius:4px;height:8px;overflow:hidden">
+        <div style="height:100%;width:${Math.round((goal.pct||0)*100)}%;background:${goal.won ? 'var(--green)' : 'var(--accent)'}"></div>
+      </div>
+    </div>` : '';
   m.innerHTML = `
     <h2>Your Desk <span class="sub">— what needs you, in plain English. Every light and card clicks through to the full detail.</span></h2>
+    ${goalBar}
 
     <div class="gauges">
       ${g.map(x => `
-        <div class="gauge ${x.status}" onclick="switchTab('${x.tab}')"
-             title="Click to open the full ${x.tab} view">
+        <div class="gauge ${x.status}" onclick="clickGauge('${x.key}')"
+             title="Click for what moved and one next step">
           <div class="glabel">${esc(x.label)}</div>
           <div class="ghead">${esc(x.head)}</div>
           <div class="gdetail">${esc(x.detail)}</div>
@@ -350,11 +430,46 @@ function renderTutorial(tut) {
           ${(!s.done && next && s.id === next.id) ? `<div class="sub">${esc(s.text)}</div>
             <div style="margin-top:4px">
               <button class="small primary" onclick="switchTab('${s.tab}')">Take me there</button>
-              ${s.id !== 'exam' ? `<button class="small" onclick="act('tutorial_ack',{step_id:'${s.id}'})">Mark done</button>` : ''}
+              ${s.id !== 'exam' && s.id !== 'welcome' ? `<button class="small" onclick="act('tutorial_ack',{step_id:'${s.id}'})">Mark done</button>` : ''}
+              ${s.id === 'welcome' ? '<span class="sub">Click a health light above — that is the only way to finish this step.</span>' : ''}
             </div>` : ''}
         </div>
       </div>`).join('')}
   </div>`;
+}
+
+async function clickGauge(key) {
+  try { await api('/api/action', { action: 'tutorial_ack', payload: { step_id: 'welcome' } }); }
+  catch (e) { /* tour may be off */ }
+  SUM = await api('/api/summary');
+  renderTopbar();
+  renderFranchise();
+  renderNav();
+  const d = await section('desk');
+  if (TAB === 'desk') await tabDesk($('main'));
+  const g = (d.gauges || []).find(x => x.key === key);
+  if (g) showGaugeDrill(g, d.cards || []);
+}
+
+function showGaugeDrill(g, cards) {
+  const statusWord = g.status === 'g' ? 'Fine' : g.status === 'y' ? 'Watch' : 'Trouble';
+  const match = (cards || []).find(c => c.tab === g.tab);
+  let actionHtml = '';
+  if (match && match.actions && match.actions[0]) {
+    const a = match.actions[0];
+    actionHtml = `<p class="sub" style="margin-top:10px">From your advisors: ${esc(match.title)}</p>
+      <button class="primary small" onclick='closeText();doSteps(${jattr(match.id)}, ${jattr(a.steps)})'>${esc(a.label)}</button>`;
+  }
+  const html = `<div class="memoform">
+      <div class="memorow"><span class="k">Status</span>
+        <span class="v"><b>${esc(g.head)}</b> — ${statusWord}</span></div>
+      <p style="margin-top:8px">${esc(g.detail)}</p>
+      <p class="moved">${esc(g.moved || 'Nothing to compare yet.')}</p>
+      ${actionHtml}
+    </div>`;
+  showHtml(g.label, html, [
+    ['Open the full book', `closeText();switchTab('${g.tab}')`, 'primary']
+  ]);
 }
 
 function renderAdvCard(c) {
@@ -388,14 +503,23 @@ async function dismissCard(id) {
 async function doSteps(cardId, steps) {
   if (BUSY) return;
   BUSY = true;
+  const notes = [];
   try {
     for (const s of steps) {
-      if (s.kind === 'set') await api('/api/set', { path: s.path, value: s.value });
-      else await api('/api/action', { action: s.action, payload: s.payload });
+      if (s.kind === 'goto') { TAB = s.tab; REVEALED.add(s.tab); continue; }
+      if (s.kind === 'set') {
+        await api('/api/set', { path: s.path, value: s.value });
+        notes.push('Policy: ' + String(s.path).split('.').pop());
+      } else {
+        const r = await api('/api/action', { action: s.action, payload: s.payload });
+        if (r.result && r.result.message) notes.push(r.result.message);
+      }
     }
     await api('/api/action', { action: 'advisor_dismiss', payload: { card_id: cardId } });
-    toast('Done. (Everything the advisor did, you could have set by hand.)');
-  } catch (e) { toast(String(e), true); }
+    toast(notes.length ? notes.join(' · ') : 'Done. (You could have set this by hand.)');
+  } catch (e) {
+    toast(notes.length ? ('Partial: ' + notes.join(' · ') + ' — then: ' + e) : String(e), true);
+  }
   finally { BUSY = false; }
   await refresh();
 }
@@ -424,7 +548,11 @@ async function tabDashboard(m) {
       ${card('Deposits', fmc(b.deposits), dt('uninsured') + ' ' + pct(mt.uninsured_pct, 0))}
       ${card('Equity', fmc(b.equity), dt('tbv') + ' ' + fm(mt.tbv_per_share))}
       ${card('Net income (TTM)', fmc(mt.net_income_ttm), 'MTD ' + fmc(b.ni_mtd), cls(mt.net_income_ttm))}
-      ${card(dt('roa'), pct(mt.roa) + ' / ' + pct(mt.roe, 1), peerNote('roa', mt.roa))}
+      ${card(dt('roa'), mt.earnings_ready === false || mt.roa == null
+        ? '—' : pct(mt.roa) + ' / ' + pct(mt.roe, 1),
+        mt.earnings_ready === false || mt.roa == null
+          ? 'too early for a year rate'
+          : peerNote('roa', mt.roa))}
       ${card(dt('nim'), pct(mt.nim), peerNote('nim', mt.nim) + ' · ' + dt('cof') + ' ' + pct(mt.cost_of_funds))}
       ${card(dt('eff'), pct(mt.efficiency, 0), peerNote('efficiency', mt.efficiency, true))}
       ${card(dt('npa'), pct(mt.npa_ratio), peerNote('npa_ratio', mt.npa_ratio, true) + ' · ' + dt('reserves') + ' ' + pct(mt.reserve_coverage))}
@@ -455,8 +583,9 @@ async function tabDashboard(m) {
         </div>
       </div>
       <div class="panel">
-        <h3>Latest news</h3>
-        <div id="dash-news">${newsList(SUM.log)}</div>
+        <h3>This month</h3>
+        ${renderDigest(SUM.digest)}
+        <div class="sub" style="margin-top:8px">Full log is on the Events tab.</div>
       </div>
     </div>`;
   const hist = (await section('reports')).metrics_history;
@@ -483,6 +612,24 @@ function curveAt(curve, tenor) {
   const p = curve.find(c => c[0] === tenor);
   return p ? p[1] : null;
 }
+function renderDigest(d) {
+  if (!d) return '<span class="sub">Advance a month to get a digest. The firehose lives on Events.</span>';
+  const bits = [
+    `<div>${esc(d.econ)}</div>`,
+    `<div class="kv" style="margin-top:6px">
+      <span class="k">Month’s profit</span><span class="v ${cls(d.ni)}">${fm(d.ni)}</span>
+      <span class="k">Deposits</span><span class="v ${cls(d.dep_flow)}">${d.dep_flow >= 0 ? '+' : ''}${fmc(d.dep_flow)}</span>
+      <span class="k">Loans</span><span class="v ${cls(d.loan_flow)}">${d.loan_flow >= 0 ? '+' : ''}${fmc(d.loan_flow)}</span>
+      <span class="k">${MODE === 'owner' ? 'Loans vs deposits' : 'LDR'}</span><span class="v">${d.ldr != null ? d.ldr.toFixed(2) : '—'}</span>
+    </div>`,
+    d.local ? `<div style="margin-top:6px">${esc(d.local)}</div>` : '',
+    d.exam ? `<div class="warn" style="margin-top:6px">${esc(d.exam)}</div>` : '',
+    d.window ? `<div class="sub">Window used ${d.window} time${d.window === 1 ? '' : 's'} this charter.</div>` : '',
+    d.fraud ? `<div class="sub">${d.fraud} fraud case${d.fraud === 1 ? '' : 's'} still open.</div>` : '',
+  ];
+  return bits.filter(Boolean).join('');
+}
+
 function newsList(log) {
   return (log || []).slice().reverse().map(ev =>
     `<div class="newsitem ${ev.blocking ? 'block' : ''}">
@@ -559,7 +706,26 @@ async function tabLending(m) {
   const prods = Object.keys(PRODUCT_LABELS).filter(p => d.products_enabled.includes(p));
   m.innerHTML = `
     <h2>Lending</h2>
-    <div class="cards">
+    <div class="panel">
+      <h3>Decisions waiting — read the memo</h3>
+      ${d.queue.length ? `<table><tr><th>Borrower</th><th>Product</th><th class="r">Amount</th>
+        <th class="r">Rate</th><th>Tier</th><th class="r">${dt('dscr')}</th><th class="r">${dt('ltv')}</th>
+        <th>Expires</th><th></th></tr>
+        ${d.queue.map(a => `<tr class="click" onclick='showMemo(${jattr(a)})'>
+          <td>${esc(a.name)}</td><td>${PRODUCT_LABELS[a.product] || a.product}</td>
+          <td class="r">${fm(a.amount)}</td><td class="r">${pct(a.rate)}</td>
+          <td>${a.tier}</td><td class="r">${a.dscr.toFixed(2)}x</td>
+          <td class="r">${Math.round(a.ltv * 100)}%</td><td>${a.days_left}d</td>
+          <td><button class="small" onclick="event.stopPropagation();showMemo(${jattr(a)})">Memo</button>
+              <button class="small primary" onclick="event.stopPropagation();act('approve_loan',{app_id:${a.id}})">Approve</button>
+              <button class="small" onclick="event.stopPropagation();act('counter_loan',{app_id:${a.id}})">Counter</button>
+              <button class="small" onclick="event.stopPropagation();act('participate_loan',{app_id:${a.id}})">Participate</button>
+              <button class="small danger" onclick="event.stopPropagation();act('decline_loan',{app_id:${a.id}})">Decline</button></td>
+        </tr>`).join('')}</table>`
+        : '<span class="sub">No applications pending. The next name lands on Your Desk.</span>'}
+    </div>
+
+    <div class="cards" style="margin-top:12px">
       ${card('Loan portfolio', fmc(Object.values(port).reduce((a, x) => a + x.balance, 0)))}
       ${card('Nonperforming', fmc(d.npl_balance))}
       ${card('Allowance (ACL)', fmc(d.allowance), 'CECL requires ' + fmc(d.reserve_required))}
@@ -610,29 +776,23 @@ async function tabLending(m) {
       <div class="ctl"><label>Sell new mortgages to secondary %</label>
         <input type="number" min="0" max="90" value="${Math.round(d.mortgage_sale_frac * 100)}"
           onchange="setPol('loans.mortgage_sale_frac', parseFloat(this.value)/100)"></div>
-      <div class="sub" style="margin-top:6px">Approved apps: ${d.stats.approved_apps} · declined: ${d.stats.declined_apps}</div>
+      <div class="helptip">Selling new 30-year mortgages to the agencies turns them
+        into cash this month (and a small gain) instead of a long asset. Raise this
+        when loans are outrunning deposits. You give up the interest.</div>
+      ${d.mortgage_preview ? `<div class="sub">At ${Math.round((d.mortgage_preview.frac || 0) * 100)}%
+        of an estimated ${fm(d.mortgage_preview.est_month_orig)} next month:
+        sell ${fm(d.mortgage_preview.sold)}, keep ${fm(d.mortgage_preview.kept)},
+        gain about ${fm(d.mortgage_preview.gain)}.</div>` : ''}
+      <div class="sub" style="margin-top:6px">Approved: ${d.stats.approved_apps}
+        · declined: ${d.stats.declined_apps}
+        · countered: ${d.stats.countered_apps || 0}
+        · participated: ${d.stats.participated_apps || 0}</div>
 
       <h3>OREO (foreclosed real estate)</h3>
       ${d.oreo.length ? `<table><tr><th>Market</th><th class="r">Carrying value</th><th class="r">Months held</th></tr>
         ${d.oreo.map(o => `<tr><td>${esc(o.market)}</td><td class="r">${fm(o.value)}</td><td class="r">${o.months_held}</td></tr>`).join('')}</table>`
         : '<span class="sub">None. Keep it that way.</span>'}
     </div>
-    </div>
-
-    <div class="panel" style="margin-top:12px">
-      <h3>Approval queue — loans awaiting your signature</h3>
-      ${d.queue.length ? `<table><tr><th>Borrower</th><th>Product</th><th class="r">Amount</th>
-        <th class="r">Rate</th><th>Tier</th><th class="r">DSCR</th><th class="r">LTV</th>
-        <th>Expires</th><th></th></tr>
-        ${d.queue.map(a => `<tr class="click" onclick='showMemo(${jattr(a)})'>
-          <td>${esc(a.name)}</td><td>${PRODUCT_LABELS[a.product] || a.product}</td>
-          <td class="r">${fm(a.amount)}</td><td class="r">${pct(a.rate)}</td>
-          <td>${a.tier}</td><td class="r">${a.dscr.toFixed(2)}x</td>
-          <td class="r">${Math.round(a.ltv * 100)}%</td><td>${a.days_left}d</td>
-          <td><button class="small primary" onclick="event.stopPropagation();act('approve_loan',{app_id:${a.id}})">Approve</button>
-              <button class="small danger" onclick="event.stopPropagation();act('decline_loan',{app_id:${a.id}})">Decline</button></td>
-        </tr>`).join('')}</table>`
-        : '<span class="sub">No applications pending. Click a row to read the credit memo when they arrive.</span>'}
     </div>
 
     <div class="panel" style="margin-top:12px">
@@ -654,9 +814,49 @@ function statusPill(s) {
 }
 
 function showMemo(a) {
-  showText('Credit memo — ' + a.name, a.memo,
-    [['Approve', `act('approve_loan',{app_id:${a.id}});closeText()`, 'primary'],
-     ['Decline', `act('decline_loan',{app_id:${a.id}});closeText()`, 'danger']]);
+  const amt = a.amount || 0;
+  const cp = a.counter_preview || {};
+  const pp = a.participate_preview || {};
+  const hold70 = cp.amount || Math.max(10000000, Math.round(amt * 0.70 / 1000000) * 1000000);
+  const hold40 = pp.hold || Math.max(10000000, Math.round(amt * 0.40 / 1000000) * 1000000);
+  const extra = cp.extra_bp || 100;
+  const term = cp.term_m || Math.max(12, Math.round((a.term_m || 60) * 0.75));
+  const ctrRate = cp.rate != null ? pct(cp.rate) : pct((a.rate || 0) + extra / 10000);
+  const approveClass = a.can_fund === false ? 'danger' : 'primary';
+  const approveLabel = a.can_fund === false ? 'Approve anyway' : 'Approve';
+  const html = `<div class="memoform">
+      <div class="who-name">${esc(a.name)}</div>
+      <div class="sub">${esc(PRODUCT_LABELS[a.product] || a.product)} · grade ${esc(a.tier)}
+        · ${fm(amt)} at ${pct(a.rate)} · ${a.term_m || 60} months
+        · ${a.days_left} days to answer</div>
+      <div class="memorow"><span class="k">Why them</span>
+        <span class="v">${esc(a.why || 'A borrower in a market we serve.')}</span></div>
+      <div class="memorow"><span class="k">${dt('dscr')}</span>
+        <span class="v">${(a.dscr || 0).toFixed(2)}× — ${esc(a.dscr_gloss || '')}</span></div>
+      <div class="memorow"><span class="k">${dt('ltv')}</span>
+        <span class="v">${Math.round((a.ltv || 0) * 100)}% — ${esc(a.ltv_gloss || '')}</span></div>
+      ${a.collateral ? `<div class="memorow"><span class="k">Collateral</span>
+        <span class="v">${esc(a.collateral)}</span></div>` : ''}
+      <div class="memorow"><span class="k">If we decline</span>
+        <span class="v">They walk to ${esc(a.rival || 'a rival')}.</span></div>
+      ${a.relationship_line ? `<div class="memorow"><span class="k">Relationship</span>
+        <span class="v">${esc(a.relationship_line)}</span></div>` : ''}
+      <div class="memorow"><span class="k">Policy</span>
+        <span class="v">${esc(a.exception || 'Within published policy.')}</span></div>
+      ${a.can_fund === false ? `<div class="banner amber" style="margin-top:10px">We do not have the cash to book this whole hold. Participate, raise deposits, or sell bonds.</div>` : ''}
+      <div class="counterbox">
+        <b>Counter before they walk</b>
+        <p>Offer +${extra}bp (${ctrRate}), hold ${fm(hold70)}, ${term} months. They may take it or leave.</p>
+        <p class="sub">Participate: we book ${fm(hold40)}; the rest is sold. Use this when cash cannot cover the whole hold.</p>
+      </div>
+      ${(!a.why && a.memo) ? `<pre class="memo-fallback" style="margin-top:10px">${esc(a.memo)}</pre>` : ''}
+    </div>`;
+  showHtml('Credit decision — ' + a.name, html,
+    [[approveLabel, `act('approve_loan',{app_id:${a.id}});closeText()`, approveClass],
+     ['Counter +100bp', `act('counter_loan',{app_id:${a.id}});closeText()`, ''],
+     ['Participate 40%', `act('participate_loan',{app_id:${a.id}});closeText()`, ''],
+     ['Decline', `act('decline_loan',{app_id:${a.id}});closeText()`, 'danger']],
+    'wide');
 }
 
 /* ---------------- Deposits ---------------- */
@@ -666,12 +866,46 @@ const DEP_LABELS = {
   cd_2y: 'CD 2-year', cd_5y: 'CD 5-year',
 };
 
+function depositStance(d) {
+  const mm = d.offsets_bp.money_market || 0;
+  const cd = d.offsets_bp.cd_1y || 0;
+  if (mm >= 25 || cd >= 25) return 'You are paying up for hot money.';
+  if (mm <= -25 && cd <= -25) return 'You are cheap on deposits — balances will leak.';
+  return 'You are near the market on the products that move.';
+}
+
+function depHotRow(d, t, p) {
+  const mkt = p === 'checking' ? '—' : pct(d.market_rates[p] ?? d.market_rates.savings);
+  const stance = p === 'checking' ? '—' :
+    `<input type="number" step="5" min="-300" max="300" value="${d.offsets_bp[p]}"
+      oninput="prevDep('${p}', this.value, ${d.offsets_bp[p]}, ${t[p]})"
+      onchange="setPol('deposits.offsets_bp.${p}', parseInt(this.value))">`;
+  return `<tr>
+    <td>${DEP_LABELS[p]}</td>
+    <td class="r"><b>${pct(d.effective_rates[p])}</b></td>
+    <td class="r">${mkt}</td>
+    <td class="r">${stance}</td>
+    <td class="r">${fmc(t[p])}</td>
+  </tr>`;
+}
+
 async function tabDeposits(m) {
   const d = await section('deposits');
   const t = d.totals;
+  const hot = ['money_market', 'cd_1y', 'checking'];
   m.innerHTML = `
     <h2>Deposits</h2>
-    <div class="cards">
+    <div class="panel">
+      <p class="stance">${esc(depositStance(d))}</p>
+      <h3>The products that move</h3>
+      <table><tr><th>Product</th><th class="r">You pay</th><th class="r">Market</th>
+        <th class="r">${dt('spread', MODE === 'owner' ? 'Your stance (bp)' : 'Offset bp')}</th>
+        <th class="r">Balance</th></tr>
+        ${hot.map(p => depHotRow(d, t, p)).join('')}
+      </table>
+      <div class="helptip">Money market and the 1-year CD reprice fastest. Checking is the cheap core — do not give it away.</div>
+    </div>
+    <div class="cards" style="margin-top:12px">
       ${card('Total deposits', fmc(t._total), t._accounts.toLocaleString() + ' accounts')}
       ${card('Cost of deposits', pct(d.cost_of_deposits))}
       ${card('Uninsured share', pct(d.uninsured, 0), 'over the $250k FDIC limit')}
@@ -750,9 +984,27 @@ function sumAccounts(pools, p) {
 async function tabTreasury(m) {
   const d = await section('treasury');
   const s = d.summary;
+  const liq = d.liquidity_ratio;
+  const cashLine = liq < 0.06 ? 'Cash is short. A runoff becomes a phone call.'
+    : liq < 0.11 ? 'Cash is adequate if nothing surprises us.'
+    : 'We can fund a credit or a surprise without selling bonds.';
   m.innerHTML = `
     <h2>Treasury — securities, funding, capital</h2>
-    <div class="cards">
+    <div class="panel">
+      <p class="stance">${esc(cashLine)}</p>
+      <div class="kv">
+        <span class="k">Cash on hand</span><span class="v">${fm(d.cash)}</span>
+        <span class="k">Fed funds sold</span><span class="v">${fmc(d.fed_funds_sold)}</span>
+        <span class="k">${dt('liquidity')}</span><span class="v">${pct(liq, 1)}</span>
+      </div>
+      <div class="ctl" style="margin-top:8px"><label>Overnight shortfall</label>
+        <select onchange="setPol('funding.overnight_policy', this.value)">
+          <option value="ask" ${d.overnight_policy==='ask'?'selected':''}>Ask me (default) — clock stops, window is a choice</option>
+          <option value="auto" ${d.overnight_policy==='auto'?'selected':''}>Auto — FHLB, then fed funds, window last</option>
+        </select></div>
+      <div class="helptip">Ask is the owner default. Auto still logs every window use; examiners count them either way.</div>
+    </div>
+    <div class="cards" style="margin-top:12px">
       ${card('Cash', fmc(d.cash), 'fed funds sold ' + fmc(d.fed_funds_sold))}
       ${card(dt('afs', MODE === 'owner' ? 'Sellable bonds (AFS)' : 'AFS portfolio'), fmc(s.afs_mv), 'book ' + fmc(s.afs_book))}
       ${card(dt('htm', MODE === 'owner' ? 'Locked bonds (HTM)' : 'HTM portfolio'), fmc(s.htm_book), 'unrealized ' + fmc(s.htm_unrealized), cls(s.htm_unrealized))}
@@ -793,6 +1045,7 @@ async function tabTreasury(m) {
         <span class="k">Discount window drawn</span><span class="v ${d.funding.dw > 0 ? 'neg' : ''}">${fmc(d.funding.dw)}</span>
         <span class="k">Discount window lifetime uses</span><span class="v">${d.funding.dw_uses}</span>
       </div>
+      <div class="sub" style="margin-top:6px">Overnight policy is set at the top of this page.</div>
       <div class="ctl" style="margin-top:8px"><label>FHLB advance $</label>
         <input type="number" id="fh-amt" value="2000000">
         <label>months</label><input type="number" id="fh-term" value="12" style="width:52px">
@@ -902,9 +1155,10 @@ async function tabOps(m) {
         <td><button class="small danger" onclick="act('close_branch',{branch_id:${b.id}})">Close</button></td></tr>`).join('')}
       </table>
       <div class="ctl" style="margin-top:8px"><label>Open branch in</label>
-        <select id="br-mkt">${Object.entries(d.markets).map(([mid, mk]) =>
-          `<option value="${mid}">${esc(mk.name)}</option>`).join('')}</select>
-        <button class="small primary" onclick="act('open_branch', {market: $('br-mkt').value})">Open (~$1.8M+)</button></div>
+        <select id="br-mkt" onchange="showBranchPreview()">${branchOptions(d)}</select>
+        <button class="small primary" id="br-open" onclick="confirmOpenBranch()">Review & open</button></div>
+      <div class="prevbar" id="prev-branch"></div>
+      <div class="helptip">Peer towns are the intended second county. Dallas and NYC are capital events — the preview says so before you click.</div>
 
       <h3>Marketing ($/month by market)</h3>
       <table><tr><th>Market</th><th class="r">Brand</th><th class="r">Spend $/mo</th></tr>
@@ -927,6 +1181,137 @@ async function tabOps(m) {
       </table>
     </div>
     </div>`;
+  showBranchPreview();
+}
+
+const KIND_LABELS = {
+  rural: 'Peer towns', small_metro: 'Small metros', suburb: 'Suburbs',
+  metro: 'Metros', money_center: 'Money centers',
+};
+const VERDICT_TEXT = {
+  cannot_fund: 'Cannot fund — raise capital or sell bonds first',
+  lethal: 'This will dilute you below well-capitalized',
+  stretch: 'Stretch — capital gets tight after the gather',
+  safe: 'Safe for a bank your size',
+};
+
+function branchOptions(d) {
+  const order = d.kind_order || ['rural', 'small_metro', 'suburb', 'metro', 'money_center'];
+  const byKind = {};
+  Object.entries(d.markets || {}).forEach(([mid, mk]) => {
+    const k = mk.kind || 'rural';
+    (byKind[k] = byKind[k] || []).push([mid, mk]);
+  });
+  return order.map(k => {
+    const rows = byKind[k] || [];
+    if (!rows.length) return '';
+    return `<optgroup label="${esc(KIND_LABELS[k] || k)}">${rows.map(([mid, mk]) => {
+      const p = (d.previews || {})[mid] || {};
+      const tag = p.verdict === 'cannot_fund' ? ' — cannot fund'
+        : p.verdict === 'lethal' ? ' — capital event'
+        : p.verdict === 'stretch' ? ' — stretch' : '';
+      return `<option value="${esc(mid)}">${esc(mk.name)} · open ${fmc(p.cost || 0)}${tag}</option>`;
+    }).join('')}</optgroup>`;
+  }).join('');
+}
+
+function showBranchPreview() {
+  const sel = $('br-mkt');
+  const box = $('prev-branch');
+  const btn = $('br-open');
+  if (!sel || !box) return;
+  const d = SEC.ops || {};
+  const p = (d.previews || {})[sel.value];
+  if (!p) { box.textContent = ''; return; }
+  const lev = ((p.proforma_leverage || 0) * 100).toFixed(1);
+  const vtxt = VERDICT_TEXT[p.verdict] || p.verdict;
+  box.innerHTML =
+    `${esc(p.name)}: open ${fm(p.cost)}, ${fm(p.monthly)}/mo, year-1 gather ≈ ${fm(p.year1_gather)}. `
+    + `Pro-forma leverage ${lev}% (${esc(vtxt)}).`;
+  box.className = 'prevbar' + (p.verdict === 'lethal' || p.verdict === 'cannot_fund' ? ' neg' : '');
+  if (btn) {
+    btn.disabled = !p.can_fund;
+    btn.textContent = p.can_fund ? 'Review & open' : 'Cannot fund';
+  }
+}
+
+function marketGroups(d) {
+  const order = d.kind_order || ['rural', 'small_metro', 'suburb', 'metro', 'money_center'];
+  const byKind = {};
+  Object.entries(d.regions || {}).forEach(([mid, r]) => {
+    const k = r.kind || 'rural';
+    (byKind[k] = byKind[k] || []).push([mid, r]);
+  });
+  return order.map(k => {
+    const rows = byKind[k] || [];
+    if (!rows.length) return '';
+    return `<div class="kindhead">${esc(KIND_LABELS[k] || k)}</div>
+      <table><tr><th>Market</th><th>Kind</th>
+        <th class="r">${MODE === 'owner' ? 'Your slice' : 'Your share'}</th>
+        <th class="r">$25M ceiling</th>
+        <th>Verdict</th><th></th></tr>
+      ${rows.map(([mid, r]) => {
+        const p = (d.previews || {})[mid] || {};
+        const verdict = r.my_branches
+          ? 'You already have a branch.'
+          : (VERDICT_TEXT[p.verdict] || p.verdict || '');
+        return `<tr>
+          <td title="${esc(r.note)}">${esc(r.name)}</td>
+          <td class="sub">${esc(KIND_LABELS[r.kind] || r.kind || '')}</td>
+          <td class="r ${r.my_share > 0 ? 'pos' : ''}">${pct(r.my_share, 1)}</td>
+          <td class="r">${pct(r.ceiling_25m, 2)}</td>
+          <td class="sub">${esc(verdict)}</td>
+          <td>${r.my_branches
+            ? '<span class="pill b">Open</span>'
+            : `<button class="small" onclick="openMarketPreview('${esc(mid)}')">Open preview</button>`}</td>
+        </tr>`;
+      }).join('')}
+      </table>`;
+  }).join('');
+}
+
+function openMarketPreview(mid) {
+  const d = SEC.markets || {};
+  const p = (d.previews || {})[mid];
+  if (!p) { toast('No preview for that market.', true); return; }
+  const vtxt = VERDICT_TEXT[p.verdict] || p.verdict;
+  const html = `<div class="memoform">
+      <div class="who-name">${esc(p.name)}</div>
+      <div class="sub">${esc(KIND_LABELS[p.kind] || p.kind || '')}</div>
+      <div class="memorow"><span class="k">Open cost</span><span class="v">${fm(p.cost)}</span></div>
+      <div class="memorow"><span class="k">Monthly</span><span class="v">${fm(p.monthly)}/mo</span></div>
+      <div class="memorow"><span class="k">Year-1 gather</span><span class="v">≈ ${fm(p.year1_gather)}</span></div>
+      <div class="memorow"><span class="k">Pro-forma leverage</span>
+        <span class="v">${((p.proforma_leverage || 0) * 100).toFixed(1)}%</span></div>
+      <p class="moved">${esc(vtxt)}</p>
+    </div>`;
+  const btns = p.can_fund
+    ? [['Open this branch', `closeText();confirmOpenBranch('${mid}','markets')`,
+        (p.verdict === 'lethal' || p.verdict === 'stretch') ? 'danger' : 'primary']]
+    : [];
+  showHtml('Branch preview — ' + p.name, html, btns);
+}
+
+function confirmOpenBranch(market, source) {
+  const mid = market || ($('br-mkt') && $('br-mkt').value);
+  if (!mid) return;
+  const src = source || 'ops';
+  const p = ((SEC[src] || {}).previews || {})[mid];
+  if (!p) return;
+  if (!p.can_fund) {
+    toast('Not enough cash to open this branch ($' + Math.round(p.cost / 100).toLocaleString() + ' needed).', true);
+    return;
+  }
+  if (p.verdict === 'lethal' || p.verdict === 'stretch') {
+    const ok = confirm(
+      (p.verdict === 'lethal'
+        ? 'This branch will dilute you below well-capitalized. '
+        : 'This branch is a stretch for your capital. ')
+      + 'Year-1 gather ≈ ' + fm(p.year1_gather)
+      + ', pro-forma leverage ' + ((p.proforma_leverage || 0) * 100).toFixed(1) + '%. Open anyway?');
+    if (!ok) return;
+  }
+  act('open_branch', { market: mid });
 }
 
 /* ---------------- Risk & Reg ---------------- */
@@ -963,7 +1348,7 @@ async function tabRisk(m) {
         <span class="v ${(-(Math.min(0, d.aoci) + Math.min(0, d.htm_unrealized)) / Math.max(1, c.cet1)) > 0.25 ? 'neg' : ''}">
           ${pct(-(Math.min(0, d.aoci) + Math.min(0, d.htm_unrealized)) / Math.max(1, c.cet1), 0)}</span>
       </div>
-      <div class="helptip">This is the Silicon Valley Bank dial. If unrealized losses approach your capital and your uninsured depositors notice, the run starts.</div>
+      <div class="helptip">${durationTrapCopy()}</div>
       <h3>Liquidity & funding</h3>
       <div class="kv">
         <span class="k">Liquid assets / assets</span><span class="v">${pct(d.liquidity_ratio, 1)}</span>
@@ -1013,8 +1398,8 @@ async function tabRisk(m) {
       <h3>Exam history</h3>
       ${d.exam_reports.slice().reverse().map(r =>
         `<div class="newsitem"><span class="nd">${esc(r.date)}</span>
-          Composite ${r.composite}
-          <a onclick='showText("Report of Examination — ${esc(r.date)}", ${JSON.stringify(esc(r.text))})'>read report</a>
+          ${MODE === 'owner' ? 'Report card' : 'Composite'} ${r.composite}
+          <a onclick='showExam(${JSON.stringify(esc(r.date))}, ${r.composite}, ${JSON.stringify(esc(r.text))})'>read report</a>
         </div>`).join('') || '<span class="sub">Not yet examined. They will come.</span>'}
     </div>
     </div>`;
@@ -1030,28 +1415,16 @@ async function tabMarkets(m) {
       <div class="panel"><canvas id="ch-macro" class="chart"></canvas></div>
     </div>
     <div class="panel" style="margin-top:12px">
-      <h3>Your markets — and the ones you could enter (open a branch from Operations)</h3>
-      <table><tr><th>Market</th><th class="r">Population</th><th class="r">Med. income</th>
-        <th class="r">Deposit pool</th><th class="r">Your share</th><th class="r">Branches</th>
-        <th class="r">Brand</th><th class="r">Activity</th><th>Conditions</th></tr>
-      ${Object.entries(d.regions).map(([mid, r]) => `<tr>
-        <td title="${esc(r.note)}">${esc(r.name)}</td>
-        <td class="r">${r.pop.toLocaleString()}</td>
-        <td class="r">$${r.income.toLocaleString()}</td>
-        <td class="r">${fmc(r.deposit_pool)}</td>
-        <td class="r ${r.my_share > 0 ? 'pos' : ''}">${pct(r.my_share, 1)}</td>
-        <td class="r">${r.my_branches}</td>
-        <td class="r">${r.brand ? r.brand.toFixed(0) : '·'}</td>
-        <td class="r ${r.activity > 1.05 ? 'pos' : r.activity < 0.95 ? 'neg' : ''}">${r.activity.toFixed(2)}</td>
-        <td>${r.shock ? `<span class="pill r">${esc(r.shock.name)}</span>` : '<span class="sub">normal</span>'}</td>
-      </tr>`).join('')}
-      </table>
+      <h3>Geography — peer towns first, money centers last</h3>
+      <div class="helptip">A $25 million bank cannot take a real slice of Dallas. The ceiling is the honest share of that pool. Open preview before you spend the capital.</div>
+      ${marketGroups(d)}
     </div>
     <div class="grid g2" style="margin-top:12px">
     <div class="panel">
       <h3>Rival banks</h3>
-      <table><tr><th>Bank</th><th>Strategy</th><th class="r">Assets</th><th class="r">Capital</th>
-        <th class="r">NPAs</th><th class="r">ROA</th></tr>
+      <table><tr><th>Bank</th><th>Strategy</th><th class="r">Assets</th>
+        <th class="r">${dt('cet1', MODE === 'owner' ? 'Capital' : 'Capital')}</th>
+        <th class="r">${dt('npa')}</th><th class="r">${dt('roa')}</th></tr>
       ${d.competitors.map(b => `<tr class="${b.alive ? '' : 'sub'}">
         <td>${esc(b.name)}${b.alive ? '' : ' †'}</td><td>${esc(b.strategy.replace('_', ' '))}</td>
         <td class="r">${fmc(b.assets)}</td>
@@ -1063,8 +1436,9 @@ async function tabMarkets(m) {
     </div>
     <div class="panel">
       <h3>Peer comparison (banks your size)</h3>
-      <table><tr><th>Bank</th><th class="r">Assets</th><th class="r">ROA</th><th class="r">NIM</th>
-        <th class="r">Efficiency</th><th class="r">NPAs</th></tr>
+      <table><tr><th>Bank</th><th class="r">Assets</th>
+        <th class="r">${dt('roa')}</th><th class="r">${dt('nim')}</th>
+        <th class="r">${dt('eff')}</th><th class="r">${dt('npa')}</th></tr>
       <tr style="color:#fff;font-weight:700"><td>YOU</td>
         <td class="r">${fmc(d.me.assets)}</td><td class="r">${pct(d.me.roa)}</td>
         <td class="r">${pct(d.me.nim)}</td><td class="r">${pct(d.me.efficiency, 0)}</td>
@@ -1139,7 +1513,7 @@ async function tabReports(m) {
         `<tr><td>${esc(l)}</td><td class="r">${fm(v)}</td></tr>`).join('')}</table>
       <h3>Call reports filed</h3>
       <div class="sub">${d.call_reports.length ? d.call_reports.map(cr =>
-        `${esc(cr.date)} (CAMELS ${cr.camels}, ${esc(cr.pca)})`).join(' · ') : 'none yet'}</div>
+        `${esc(cr.date)} (${MODE === 'owner' ? 'report card' : 'CAMELS'} ${cr.camels}, ${esc(cr.pca)})`).join(' · ') : 'none yet'}</div>
     </div>
     </div>`;
   const h = d.metrics_history;
@@ -1213,9 +1587,40 @@ function renderEventModal() {
         <button class="primary" onclick="eventChoice(${ev.id}, 'bid', {premium_bp: numIn('bid-bp')})">Submit bid</button>
         <button onclick="eventChoice(${ev.id}, 'pass')">Pass</button></div>`;
   } else if (ev.type === 'bank_for_sale') {
+    const pf = (ev.deal && ev.deal.proforma) || {};
+    const blocked = pf.can_buy === false;
+    const why = (pf.blockers || []).join('; ');
     controls = `<div class="btnrow">
-      <button class="primary" onclick="eventChoice(${ev.id}, 'buy')">Buy it</button>
-      <button onclick="eventChoice(${ev.id}, 'pass')">Pass</button></div>`;
+      <button class="primary" ${blocked ? 'disabled title="' + esc(why) + '"' : ''}
+        onclick="eventChoice(${ev.id}, 'buy')">${blocked ? 'Cannot close' : 'Buy it'}</button>
+      <button onclick="eventChoice(${ev.id}, 'pass')">Pass</button></div>
+      ${blocked ? `<div class="helptip">${esc(why)}</div>` : ''}`;
+  } else if (ev.type === 'exam') {
+    const comp = ev.composite || 3;
+    const owner = MODE === 'owner' && ev.owner_title;
+    controls = `<div class="btnrow">
+      <button class="primary" onclick="dismissEvent(${ev.id})">Acknowledged</button></div>`;
+    box.innerHTML = `<div class="modalbox exam-modal c${comp}">
+      <h2>${esc(owner || ev.title)}</h2>
+      <div class="sub">${esc(ev.date)}${pend.length > 1 ? ` · ${pend.length - 1} more waiting` : ''}</div>
+      ${ev.owner_summary && MODE === 'owner' ? `<p style="margin:8px 0">${esc(ev.owner_summary)}</p>` : ''}
+      <pre>${esc(ev.text || '')}</pre>
+      ${controls}
+    </div>`;
+    return;
+  } else if (ev.type === 'quarter_close') {
+    controls = `<div class="btnrow">
+      <button class="primary" onclick="dismissEvent(${ev.id})">File it</button></div>`;
+  } else if (ev.type === 'goal_won') {
+    controls = `<div class="btnrow">
+      <button class="primary" onclick="eventChoice(${ev.id}, 'keep')">Keep playing</button>
+      <button onclick="eventChoice(${ev.id}, 'retire')">Retire to the title screen</button></div>`;
+  } else if (ev.type === 'overnight_shortfall') {
+    controls = `<div class="btnrow">
+      <button class="primary" onclick="eventChoice(${ev.id}, 'fhlb')">Draw FHLB</button>
+      <button onclick="eventChoice(${ev.id}, 'fed_funds')">Borrow fed funds</button>
+      <button class="danger" onclick="eventChoice(${ev.id}, 'window')">Use the discount window</button>
+      <button onclick="eventChoice(${ev.id}, 'wait')">Wait — shrink originations</button></div>`;
   } else if (ev.type === 'buyout_offer') {
     controls = `<div class="btnrow">
       <button class="danger" onclick="eventChoice(${ev.id}, 'accept')">Sell the bank</button>
@@ -1261,17 +1666,40 @@ function openEvent(id) {
 }
 
 /* ---------------- text modal ---------------- */
-function showText(title, text, buttons) {
+function showModal(title, bodyHtml, buttons, klass) {
   const box = $('textmodal');
   box.classList.remove('hidden');
-  const btns = (buttons || []).map(([label, code, klass]) =>
-    `<button class="${klass || ''}" onclick="${code}">${label}</button>`).join('');
-  box.innerHTML = `<div class="modalbox">
-    <h2>${title}</h2><pre>${text}</pre>
-    <div class="btnrow">${btns}<button onclick="closeText()">Close</button></div>
+  const btns = (buttons || []).map(([label, code, k]) =>
+    `<button class="${k || ''}" onclick="${code}">${label}</button>`).join('');
+  box.innerHTML = `<div class="modalbox ${klass || ''}" onclick="event.stopPropagation()">
+    <h2>${esc(title)}<button class="modal-x" onclick="closeText()" title="Close (Esc)">×</button></h2>
+    ${bodyHtml}
+    <div class="btnrow">${btns}<button class="primary" onclick="closeText()">Close</button></div>
   </div>`;
+  box.onclick = () => closeText();
 }
-function closeText() { $('textmodal').classList.add('hidden'); $('textmodal').innerHTML = ''; }
+function showText(title, text, buttons) {
+  showModal(title, `<pre>${text}</pre>`, buttons);
+}
+function showHtml(title, html, buttons, klass) {
+  showModal(title, `<div class="modalbody">${html}</div>`, buttons, klass);
+}
+function closeText() {
+  const box = $('textmodal');
+  box.classList.add('hidden');
+  box.innerHTML = '';
+  box.onclick = null;
+}
+
+function showExam(date, composite, text) {
+  const tone = composite <= 2 ? 'they are calm'
+    : composite === 3 ? 'they are watching' : 'they are not happy';
+  const head = MODE === 'owner'
+    ? `Report card: ${composite} — ${tone}.\n\nThe official letter is below.\n\n`
+    : '';
+  showText((MODE === 'owner' ? 'Report card — ' : 'Report of Examination — ') + date,
+           head + (text || ''));
+}
 
 /* ---------------- saves ---------------- */
 async function showSaves() {
@@ -1280,24 +1708,68 @@ async function showSaves() {
   $('layout').classList.add('hidden');
   const sc = $('savescreen');
   sc.classList.remove('hidden');
+  const latest = (d.saves || [])[0];
   sc.innerHTML = `
     <h2 style="font-size:22px;margin-bottom:4px">🏦 Bank Game</h2>
     <p class="sub" style="margin-bottom:16px">A courthouse square in West Texas. $20 million in assets. Three employees. Your move.</p>
+    ${latest ? `<div class="panel">
+      <h3>Continue</h3>
+      <p>${esc(latest.name)} — ${esc(latest.display_date || latest.date || 'just chartered')}
+        · ${latest.assets != null ? fmc(latest.assets) : ''}
+        ${latest.goal_label ? `<span class="sub"> · ${esc(latest.goal_label)}</span>` : ''}
+        <span class="sub"> · seed ${latest.seed}</span></p>
+      <div style="margin-top:8px">
+        <button class="primary" onclick="loadSave(${JSON.stringify(esc(latest.name))})">Continue this bank</button>
+      </div>
+    </div>` : ''}
     <div class="panel">
       <h3>New bank</h3>
       <div class="ctl"><label>Bank name</label>
         <input type="text" id="new-name" class="wide" value="First National Bank of Caprock"></div>
       <div class="ctl"><label>Seed (optional — same seed, same world)</label>
         <input type="text" id="new-seed" placeholder="random"></div>
+      <div class="ctl"><label>Home market</label>
+        <select id="new-home">
+          <option value="caprock" selected>Caprock City, TX</option>
+          <option value="verhalen">Verhalen, TX</option>
+          <option value="plainview">Plainview, TX</option>
+          <option value="lubbock">Lubbock, TX</option>
+        </select></div>
+      <div class="ctl"><label>Era</label>
+        <select id="new-era">
+          <option value="sandbox" selected>Sandbox clock (Year 1, Year 2…)</option>
+          <option value="historical">Historical 2000</option>
+        </select></div>
+      <div class="ctl"><label>Difficulty</label>
+        <select id="new-diff">
+          <option value="easy">Easy — extra $1M capital, slower examiners</option>
+          <option value="standard" selected>Standard</option>
+          <option value="hard">Hard — thinner cash, hotter competition</option>
+        </select></div>
+      <div class="ctl"><label>Goal</label>
+        <select id="new-goal">
+          <option value="independent" selected>Stay independent 20 years</option>
+          <option value="square">Best bank on the square</option>
+          <option value="headline">Don't be the next headline</option>
+          <option value="regional">Regional, not reckless</option>
+          <option value="sell">Sell well</option>
+        </select></div>
       <div class="ctl"><label><input type="checkbox" id="new-guided" checked style="width:auto">
         Guided first year (a tour + advisor nudges — recommended if banking is new to you)</label></div>
       <div style="margin-top:8px"><button class="primary" onclick="newGame()">Charter the bank</button></div>
     </div>
     <div class="panel">
       <h3>Saved banks</h3>
-      ${d.saves.length ? `<table><tr><th>Name</th><th>Date reached</th><th class="r">Seed</th><th></th></tr>
+      ${d.saves.length ? `<table><tr><th>Name</th><th>When</th><th class="r">Year</th>
+        <th class="r">Assets</th><th>Report card</th><th>Capital</th><th>Goal</th><th></th></tr>
         ${d.saves.map(s => `<tr>
-          <td>${esc(s.name)}</td><td>${esc(s.date)}</td><td class="r mono">${s.seed}</td>
+          <td>${esc(s.name)}</td>
+          <td>${esc(s.display_date || s.date)}</td>
+          <td class="r">${s.year || '—'}</td>
+          <td class="r">${s.assets != null ? fmc(s.assets) : '—'}</td>
+          <td>${s.camels != null ? (MODE === 'owner' ? 'Report card ' : 'CAMELS ') + s.camels : '—'}</td>
+          <td>${esc(s.pca || '—')}</td>
+          <td>${esc(s.goal_label || '')}</td>
           <td><button class="small primary" onclick="loadSave(${JSON.stringify(esc(s.name))})">Load</button>
               <button class="small danger" onclick="if(confirm('Delete this save?'))deleteSave(${JSON.stringify(esc(s.name))})">Delete</button></td>
         </tr>`).join('')}</table>` : '<span class="sub">No saved banks yet.</span>'}
@@ -1317,6 +1789,10 @@ async function newGame() {
     const body = { name: $('new-name').value.trim() || 'First National Bank of Caprock' };
     if (seedRaw) body.seed = parseInt(seedRaw) || 0;
     body.guided = $('new-guided') ? $('new-guided').checked : true;
+    if ($('new-home')) body.home = $('new-home').value;
+    if ($('new-era')) body.era = $('new-era').value;
+    if ($('new-diff')) body.difficulty = $('new-diff').value;
+    if ($('new-goal')) body.goal = $('new-goal').value;
     const r = await api('/api/new', body);
     toast('Charter granted. Seed: ' + r.seed);
     await refresh();
@@ -1336,8 +1812,20 @@ async function rollback(day) {
 }
 
 /* ---------------- keyboard ---------------- */
+function modalOpen() {
+  const t = $('textmodal'), ev = $('eventmodal');
+  return (t && !t.classList.contains('hidden')) || (ev && !ev.classList.contains('hidden'));
+}
+
 document.addEventListener('keydown', e => {
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+  const textOpen = $('textmodal') && !$('textmodal').classList.contains('hidden');
+  if ((e.key === 'Escape' || e.key === 'Esc') && textOpen) {
+    e.preventDefault();
+    closeText();
+    return;
+  }
+  if (modalOpen()) return;
   if (e.key === ' ') { e.preventDefault(); advance('day'); }
   else if (e.key === 'w') advance('week');
   else if (e.key === 'm') advance('month');

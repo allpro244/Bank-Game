@@ -98,6 +98,15 @@ def effective_rate(state, product):
     return max(0.0, round(r, 5))
 
 
+# How many times THIS bank's assets it can reasonably hold as deposits
+# in one market at steady state. Rural towns are small enough that a
+# $20M bank can be a real player; Dallas is not.
+KIND_ASSET_MULT = {
+    "rural": 1.8, "small_metro": 1.1, "suburb": 0.85,
+    "metro": 0.40, "money_center": 0.20,
+}
+
+
 def presence_score(state, market_id):
     """How visible/reachable the bank is in a market: branches + digital."""
     bank = state["bank"]
@@ -112,13 +121,95 @@ def presence_score(state, market_id):
     return score
 
 
+def market_deposits(state, market_id):
+    """Deposit balances already booked in this market (cents)."""
+    pools = state["bank"]["deposits"]["pools"].get(market_id)
+    if not pools:
+        return 0
+    return sum(pools[p]["balance"] for p in PRODUCTS)
+
+
+def months_in_market(state, market_id):
+    """Months since the first open branch (0 if none)."""
+    import datetime
+    opened = [b.get("opened") for b in state["bank"]["ops"]["branches"]
+              if b.get("market") == market_id and b.get("open") and b.get("opened")]
+    if not opened:
+        return 0
+    cur = datetime.date.fromisoformat(state["time"]["date"])
+    earliest = min(datetime.date.fromisoformat(d) for d in opened)
+    return max(0, (cur.year - earliest.year) * 12 + cur.month - earliest.month)
+
+
+def market_is_established(state, market_id):
+    """A real franchise already — don't ramp a seeded home market from zero."""
+    region = state["regions"][market_id]
+    here = market_deposits(state, market_id)
+    floor = max(5_000_000_00, int(region["deposit_pool"] * 0.02))
+    return here >= floor
+
+
+def market_maturity(state, market_id):
+    """0..1 ramp for a new market. Established books are 1."""
+    if market_is_established(state, market_id):
+        return 1.0
+    return min(1.0, (months_in_market(state, market_id) + 4) / 30.0)
+
+
+def size_share_cap(state, market_id, assets=None):
+    """Max share of the local pool a bank this size can hold."""
+    region = state["regions"][market_id]
+    pool = max(1, region["deposit_pool"])
+    if assets is None:
+        assets = max(1, state["bank"].get("cached_assets") or 1)
+        if assets <= 1:
+            from . import ledger as _L
+            assets = max(1, _L.total_assets(state["bank"]["ledger"]))
+    assets = max(1, assets)
+    mult = KIND_ASSET_MULT.get(region["kind"], 0.6)
+    return (assets * mult) / pool
+
+
 def natural_share(state, market_id):
+    """Target deposit share: attractiveness, then size cap, then new-market ramp.
+
+    A $20M bank with one new Dallas branch must not claim 8% of a $100B+
+    pool. Rural peer towns still play like a real community-bank franchise.
+    """
     region = state["regions"][market_id]
     pres = presence_score(state, market_id)
     if pres <= 0:
         return 0.0
     comp_weight = 6.0 * region["competition"]
-    return pres / (pres + comp_weight)
+    raw = pres / (pres + comp_weight)
+    capped = min(raw, size_share_cap(state, market_id))
+    return capped * market_maturity(state, market_id)
+
+
+def year1_gather_estimate(state, market_id):
+    """Rough year-1 deposit gather (cents) if we have presence there now.
+
+    Used by the branch-open preview. Same helpers as the monthly flow, so
+    the UI cannot invent a different number than the engine.
+    """
+    region = state["regions"].get(market_id)
+    if region is None:
+        return 0
+    # Pretend the market is 12 months old for the estimate (end of year 1),
+    # but still size-capped at today's assets.
+    pres = presence_score(state, market_id)
+    if pres <= 0:
+        # Preview before the branch exists: one standard branch.
+        pres = 1.0 ** 0.72
+    comp_weight = 6.0 * region["competition"]
+    raw = pres / (pres + comp_weight)
+    capped = min(raw, size_share_cap(state, market_id))
+    share = capped * min(1.0, 16.0 / 30.0)   # ~12 months on the ramp
+    brand = state["bank"]["ops"]["brand"].get(market_id, 8.0)
+    brand_mult = 0.55 + 0.9 * (brand / 100.0)
+    already = market_deposits(state, market_id)
+    target = int(region["deposit_pool"] * share * brand_mult)
+    return max(0, target - already)
 
 
 def step_day(state, days):

@@ -15,6 +15,7 @@ from .sim import engine, ledger as L, statements, securities, competitors
 from .sim import deposits as DEP, loans as LN, regulation as REG, funding as FUND
 from .sim import advisor as ADV
 from .sim.newgame import new_game
+from .sim import goals as GOALS
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "web")
 
@@ -28,9 +29,6 @@ class Game:
         self.store = Store()
         self.state = None
         self.lock = threading.RLock()
-        saves = self.store.list_saves()
-        if saves:
-            self.state = self.store.load(saves[0]["name"])
 
     # ------------- payload builders -------------
     def summary(self):
@@ -44,8 +42,31 @@ class Game:
         mtd = statements.income_statement_mtd(s)
         curve = [(t, econ["curve"][str(t)]) for t in
                  [0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 7.0, 10.0, 20.0, 30.0]]
+        home_id = (s.get("meta") or {}).get("home", "")
+        home_name = (s.get("regions") or {}).get(home_id, {}).get("name", home_id)
+        lenders = bank["ops"]["staff"]["lenders"]["count"]
+        lr, _liquid = REG.liquidity_ratio(s)
+        if lr < 0.06:
+            cash_stance = "Cash is tight"
+        elif lr < 0.11:
+            cash_stance = "Cash is adequate"
+        else:
+            cash_stance = "Sitting on cash"
+        exam_mo = s["regulation"]["months_to_exam"]
+        if exam_mo <= 0:
+            exam_line = "Exam this month"
+        elif exam_mo == 1:
+            exam_line = "Examiners in 1 month"
+        else:
+            exam_line = "Examiners in %d months" % exam_mo
+        people = ("You are the only lender" if lenders <= 1
+                  else "%d lenders on the street" % lenders)
         return {
-            "meta": s["meta"], "time": s["time"], "game_over": s["game_over"],
+            "meta": s["meta"],
+            "time": {**s["time"], "display": GOALS.display_date(s)},
+            "game_over": s["game_over"],
+            "goal": GOALS.progress(s),
+            "digest": (s.get("digests") or [None])[-1],
             "audit_alarm": s["audit_alarm"],
             "bank": {
                 "name": bank["name"],
@@ -67,6 +88,7 @@ class Game:
                 "orders": s["regulation"]["orders"],
                 "cra": s["regulation"]["cra"],
                 "months_to_exam": s["regulation"]["months_to_exam"],
+                "dw_uses": bank["funding"].get("discount_window_uses", 0),
             },
             "econ": {
                 "fed_funds": econ["fed_funds"], "inflation": econ["inflation"],
@@ -87,6 +109,24 @@ class Game:
             "counts": {"loan_queue": len(bank["loans"]["queue"]),
                        "fraud_cases": len([c for c in bank["fraud"]["cases"]
                                            if c["status"] == "open"])},
+            "franchise": {
+                "home": home_name, "home_id": home_id,
+                "people": people, "lenders": lenders,
+                "cash": cash_stance, "liquidity_ratio": lr,
+                "exam": exam_line, "months_to_exam": exam_mo,
+            },
+            "unlock": {
+                "months_closed": len(s["metrics"]),
+                "branches": len([b for b in bank["ops"]["branches"]
+                                 if b.get("open")]),
+                "log_len": len(s["events"]["log"]),
+                "pending": len(s["events"]["pending"]),
+                "fraud_open": len([c for c in bank["fraud"]["cases"]
+                                   if c["status"] == "open"]),
+                "orders": bool(s["regulation"]["orders"]),
+                "months_to_exam": exam_mo,
+                "audit": bool(s["audit_alarm"]),
+            },
         }
 
     def section(self, name, args):
@@ -98,7 +138,8 @@ class Game:
         econ = s["economy"]
 
         if name == "lending":
-            home_rates = competitors.market_rates(s, "caprock")["loan"]
+            home_rates = competitors.market_rates(
+                s, (s.get("meta") or {}).get("home", "caprock"))["loan"]
             return {
                 "spreads": bank["loans"]["spreads"],
                 "standards": bank["loans"]["standards"],
@@ -107,7 +148,7 @@ class Game:
                 "auto_policy": bank["loans"]["auto_policy"],
                 "mortgage_sale_frac": bank["loans"]["mortgage_sale_frac"],
                 "market_rates": home_rates,
-                "queue": bank["loans"]["queue"],
+                "queue": _queue_payload(bank["loans"]["queue"]),
                 "portfolio": LN.portfolio_stats(s),
                 "large": [l for l in bank["loans"]["large"]
                           if l["status"] not in ("paid", "defaulted")][-100:],
@@ -119,6 +160,8 @@ class Game:
                 "products_enabled": bank["products_enabled"],
                 "npl_balance": LN.npl_balance(bank["loans"]),
                 "stats": bank["loans"]["stats"],
+                "mortgage_preview": LN.mortgage_sale_preview(s),
+                "relationships": bank["loans"].get("relationships", [])[-20:],
             }
 
         if name == "deposits":
@@ -172,6 +215,7 @@ class Game:
                 "tbv": L.total_equity(ledger) - ledger["balances"]["1600"],
                 "dividend_payout": bank["policies"]["dividend_payout"],
                 "aoci": -ledger["balances"]["3200"],
+                "overnight_policy": bank["funding"].get("overnight_policy", "ask"),
             }
 
         if name == "ops":
@@ -181,6 +225,9 @@ class Game:
                                 "min_assets": min_a, "cost": cost,
                                 "enabled": prod in bank["products_enabled"],
                                 "available": bank["cached_assets"] >= min_a})
+            from .sim import operations as OPS
+            previews = {mid: OPS.preview_branch(s, mid)
+                        for mid in s["regions"]}
             return {
                 "branches": bank["ops"]["branches"],
                 "staff": bank["ops"]["staff"],
@@ -195,6 +242,8 @@ class Game:
                 "unlocks": unlocks,
                 "markets": {mid: {"name": r["name"], "kind": r["kind"]}
                             for mid, r in s["regions"].items()},
+                "previews": previews,
+                "kind_order": list(OPS.KIND_ORDER),
             }
 
         if name == "risk":
@@ -248,6 +297,8 @@ class Game:
                     "housing": r["housing_index"],
                     "my_deposits": my_dep,
                     "my_share": my_dep / max(1, r["deposit_pool"]),
+                    "share_ceiling": DEP.size_share_cap(s, mid),
+                    "ceiling_25m": DEP.size_share_cap(s, mid, 25_000_000_00),
                     "my_branches": len([b for b in bank["ops"]["branches"]
                                         if b["market"] == mid and b["open"]]),
                     "brand": bank["ops"]["brand"].get(mid, 0),
@@ -255,6 +306,8 @@ class Game:
                 }
             peers = competitors.peer_group(s)
             me_m = s["metrics"][-1] if s["metrics"] else {}
+            from .sim import operations as OPS
+            previews = {mid: OPS.preview_branch(s, mid) for mid in s["regions"]}
             return {
                 "regions": regions_out,
                 "econ_history": econ["history"][-360:],
@@ -271,6 +324,8 @@ class Game:
                        "npa_ratio": me_m.get("npa_ratio", 0),
                        "assets": bank["cached_assets"]},
                 "failed": s["competitors"]["failed_log"][-20:],
+                "previews": previews,
+                "kind_order": list(OPS.KIND_ORDER),
             }
 
         if name == "reports":
@@ -318,10 +373,11 @@ class Game:
                 "tutorial": ADV.tutorial(s),
                 "inbox": {
                     "events": s["events"]["pending"],
-                    "loans": bank["loans"]["queue"],
+                    "loans": _queue_payload(bank["loans"]["queue"]),
                     "fraud": open_cases,
                 },
                 "peer_avg": ADV.peer_averages(s),
+                "goal": GOALS.progress(s),
             }
 
         if name == "events":
@@ -333,6 +389,18 @@ class Game:
                     if s else []}
 
         return {"error": "unknown section %s" % name}
+
+
+def _queue_payload(queue):
+    """Copy applications and attach counter / participate previews."""
+    out = []
+    for app in queue:
+        a = dict(app)
+        a["counter_preview"] = LN.counter_terms(a)
+        hold, sold = LN.participate_hold(a)
+        a["participate_preview"] = {"hold": hold, "sold": sold}
+        out.append(a)
+    return out
 
 
 GAME = Game()
@@ -400,7 +468,12 @@ class Handler(BaseHTTPRequestHandler):
                 if not isinstance(seed, int):
                     seed = int.from_bytes(os.urandom(4), "big")
                 with GAME.lock:
-                    GAME.state = new_game(name, seed)
+                    GAME.state = new_game(
+                        name, seed,
+                        home=str(body.get("home") or "caprock"),
+                        difficulty=str(body.get("difficulty") or "standard"),
+                        goal=str(body.get("goal") or "independent"),
+                        era=str(body.get("era") or "sandbox"))
                     if body.get("guided") is False:
                         from .sim import advisor as _adv
                         _adv.tutorial_off(GAME.state)

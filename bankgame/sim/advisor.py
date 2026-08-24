@@ -43,20 +43,37 @@ def gauges(state):
     out = []
 
     # 1. Earnings
-    roa = m.get("roa", bank.get("roa_ttm", 0.01))
-    eff = m.get("efficiency", 0.6)
-    if roa >= 0.008:
-        st, head = "g", "Making money"
-    elif roa >= 0:
-        st, head = "y", "Thin profits"
+    if not m:
+        out.append({
+            "key": "earnings", "label": "Earnings", "status": "y",
+            "head": "Books just opened", "tab": "reports",
+            "detail": "The first real scorecard prints when January closes. "
+                      "Until then there is no return-on-assets number — anyone "
+                      "quoting one is guessing."})
+    elif not m.get("earnings_ready") or m.get("roa") is None:
+        out.append({
+            "key": "earnings", "label": "Earnings", "status": "y",
+            "head": "Too early for a year rate", "tab": "reports",
+            "detail": "A month is not a year. We will quote return on assets "
+                      "after six closed months — healthy banks earn 0.9–1.3%. "
+                      "Anyone annualizing January is guessing."})
     else:
-        st, head = "r", "Losing money"
-    out.append({
-        "key": "earnings", "label": "Earnings", "status": st, "head": head,
-        "tab": "reports",
-        "detail": ("Return on assets is %.2f%% over the last year (healthy banks earn "
-                   "0.9-1.3%%). You spend %.0f cents to make each dollar of revenue.")
-                  % (roa * 100, eff * 100)})
+        roa = m.get("roa", 0.0)
+        eff = m.get("efficiency", 0.6)
+        noisy = m.get("partial_window")
+        if roa >= 0.008:
+            st, head = "g", "Making money"
+        elif roa >= 0:
+            st, head = "y", "Thin profits"
+        else:
+            st, head = "r", "Losing money"
+        extra = (" Annualized from only a few months — noisy." if noisy else "")
+        out.append({
+            "key": "earnings", "label": "Earnings", "status": st, "head": head,
+            "tab": "reports",
+            "detail": ("Return on assets is %.2f%% over the last year (healthy banks earn "
+                       "0.9-1.3%%). You spend %.0f cents to make each dollar of revenue.%s")
+                      % (roa * 100, eff * 100, extra)})
 
     # 2. Capital
     r = REG.capital_ratios(state)
@@ -141,16 +158,49 @@ def gauges(state):
     elif ratio < 0.30:
         st, head = "y", "Paper losses growing"
     else:
-        st, head = "r", "The SVB trap"
+        from . import goals as GOALS
+        st, head = "r", ("The SVB trap" if GOALS.allow_svb_name(state)
+                         else "The duration trap")
     out.append({
         "key": "raterisk", "label": "Rate risk", "status": st, "head": head,
         "tab": "treasury",
         "detail": ("Your bonds are worth %s %s than you paid — paper %s equal to "
-                   "%.0f%% of your capital. This is what killed Silicon Valley Bank: "
-                   "big paper losses plus nervous uninsured depositors. Over 30%% "
-                   "is the danger zone.")
+                   "%.0f%% of your capital. Big paper losses plus nervous uninsured "
+                   "depositors is how a run starts. Over 30%% is the danger zone.")
                   % (_fm(abs(unreal)), "less" if unreal < 0 else "more",
                      "losses" if unreal < 0 else "gains", ratio * 100)})
+
+    last = m
+    prior = state["metrics"][-2] if len(state["metrics"]) > 1 else {}
+
+    def _moved(key):
+        if not last:
+            return "Books just opened. Nothing has moved yet."
+        if not prior:
+            return "First closed month. Nothing to compare yet."
+        if key == "earnings":
+            a, b = last.get("roa"), prior.get("roa")
+            if a is None or b is None:
+                d = (last.get("nim", 0) - prior.get("nim", 0)) * 10000
+                return "%+.0f bp of lending margin this month." % d
+            return "%+.0f bp of return on assets this month." % ((a - b) * 10000)
+        if key == "capital":
+            d = (last.get("cet1_ratio", 0) - prior.get("cet1_ratio", 0)) * 10000
+            return "%+.0f bp of core capital this month." % d
+        if key == "liquidity":
+            d = (last.get("liquidity_ratio", 0) - prior.get("liquidity_ratio", 0)) * 100
+            return "%+.1f points of ready cash this month." % d
+        if key == "credit":
+            d = (last.get("npa_ratio", 0) - prior.get("npa_ratio", 0)) * 10000
+            return "%+.0f bp of bad loans this month." % d
+        if key == "regulators":
+            return "Exam clock: %d months." % max(0, reg["months_to_exam"])
+        if key == "raterisk":
+            return "Marks move with the curve — open the bond book for the lots."
+        return ""
+
+    for item in out:
+        item["moved"] = _moved(item["key"])
     return out
 
 
@@ -199,6 +249,10 @@ def _act(label, action, payload):
 
 def _plan(label, steps):
     return {"label": label, "steps": steps}
+
+
+def _goto(label, tab):
+    return {"label": label, "steps": [{"kind": "goto", "tab": tab}]}
 
 
 # ---- individual rules (each returns a card dict or None) ----
@@ -321,6 +375,16 @@ def _r_hire_lender(state):
         util = bank["loans"]["stats"].get("originated_mtd", 0) / cap
     if util < 0.88:
         return None
+    m = state["metrics"][-1] if state["metrics"] else {}
+    ldr = m.get("loan_to_deposit") or (
+        LN.total_loans(bank["loans"]) / max(1, L.total_deposits(bank["ledger"])))
+    cash = (bank["ledger"]["balances"]["1000"]
+            + bank["ledger"]["balances"]["1010"]
+            + bank["ledger"]["balances"]["1100"])
+    # Don't recommend hiring into a funding hole — more originations you
+    # cannot book just burns salary.
+    if ldr > 1.05 or cash < 400_000_00:
+        return None
     lenders = bank["ops"]["staff"]["lenders"]
     sal = int(lenders["salary"] * bank["ops"]["salary_multiplier"])
     return _card(
@@ -357,9 +421,9 @@ def _r_rate_risk(state):
         "swap on %s of notional profits when rates rise, offsetting further "
         "damage. (It also gives back some income if rates fall — that's the "
         "price of sleeping at night.)" % (_fm(-unreal), ratio * 100, _fm(notional)),
-        "This exact combination — long bonds bought at low rates, plus "
-        "uninsured depositors who noticed — is how Silicon Valley Bank died "
-        "in 2023. The gauge to watch is 'unrealized vs capital' on Risk & Reg.",
+        "Long bonds bought at low rates plus uninsured depositors who notice "
+        "is a classic run recipe. The gauge to watch is 'unrealized vs capital' "
+        "on Risk & Reg.",
         "treasury",
         [_act("Hedge with a %s pay-fixed swap" % _fm(notional), "add_hedge",
               {"kind": "pay_fixed_swap", "notional": notional, "tenor": 3})])
@@ -384,8 +448,9 @@ def _r_late_cycle(state):
         "default in the bust. Tightening costs volume today and saves your "
         "bank in two years." % (econ["credit_boom"], ", ".join(loose)),
         "Every loan pool remembers the underwriting standards in force when "
-        "it was written ('vintage quality'). 2006 vintages ruined banks in "
-        "2008. The boom index is on the Markets tab charts.",
+        "it was written ('vintage quality'). Loose vintages from the last "
+        "boom are the ones that break you in the bust. The boom index is "
+        "on the Markets tab charts.",
         "lending",
         [_plan("Tighten %s to 'Tight'" % ", ".join(loose), steps)])
 
@@ -509,8 +574,11 @@ def _r_hoarding(state):
         return None
     ea = m["equity"] / max(1, m["assets"])
     payout = bank["policies"]["dividend_payout"]
+    roe = m.get("roe")
+    if roe is None:
+        return None
     if ea < 0.16 or payout > 40 or reg["pca"] != "well" or \
-            reg["camels"]["composite"] > 2 or m.get("roe", 0) > 0.10:
+            reg["camels"]["composite"] > 2 or roe > 0.10:
         return None
     return _card(
         "hoarding", 0, "You're sitting on a pile of idle capital",
@@ -523,6 +591,31 @@ def _r_hoarding(state):
         "sheet with no plan is a savings account with overhead.",
         "treasury",
         [_set("Raise dividend payout to 50%", "policies.dividend_payout", 50)])
+
+
+def _r_sell_mortgages(state):
+    m = state["metrics"][-1] if state["metrics"] else None
+    if m is None or m.get("loan_to_deposit", 0) < 0.98:
+        return None
+    cfg = state["bank"]["loans"]
+    if cfg.get("mortgage_sale_frac", 0) >= 0.40:
+        return None
+    prev = LN.mortgage_sale_preview(state, 0.50)
+    if prev["mortgage_balance"] < 800_000_00 and prev["est_month_orig"] < 80_000_00:
+        return None
+    return _card(
+        "sell_mortgages", 1, "Sell more of the new mortgages",
+        "Loans are %.0f%% of deposits and the mortgage book is still growing "
+        "on your balance sheet. Selling half of new production turns about "
+        "%s a month into cash (plus a ~%s gain) instead of a 30-year asset. "
+        "You give up the interest. Raise the secondary-sale slider on Lending "
+        "when originations are outrunning deposits."
+        % (m["loan_to_deposit"] * 100, _fm(prev["sold"]), _fm(prev["gain"])),
+        "Fannie and Freddie buy conforming 30-year loans. You keep a small "
+        "gain and the cash; they keep the duration. The lever is already on "
+        "the Lending tab — this card just points at it.",
+        "lending",
+        [_set("Sell 50% of new mortgages", "loans.mortgage_sale_frac", 0.50)])
 
 
 def _r_funding_stretch(state):
@@ -563,10 +656,10 @@ def _r_uninsured_watch(state):
         "through a crisis; uninsured ones run at the first headline. Build "
         "the cash buffer, spread large deposits, or accept that one bad "
         "quarter could start a stampede." % (unins * 100, lr * 100),
-        "The 2023 runs (SVB, First Republic) were uninsured-deposit runs "
-        "moving at phone speed. Your rumor gauge on Risk & Reg tracks the "
-        "same dynamics.",
-        "risk", [])
+        "Uninsured depositors run at the first headline. Your rumor gauge "
+        "on Risk & Reg tracks the same dynamics.",
+        "risk",
+        [_goto("Show me the cash and bonds", "treasury")])
 
 
 def _r_exam_prep(state):
@@ -584,15 +677,16 @@ def _r_exam_prep(state):
         "what they see on arrival day is what goes in the report, and a bad "
         "report brings restrictions that last years. Shore these up first."
         % ", ".join(weak),
-        "CAMELS = Capital, Asset quality, Management, Earnings, Liquidity, "
-        "Sensitivity to rates. Each is graded 1-5 from your actual numbers "
-        "(Risk & Reg shows the components).",
-        "risk", [])
+        "The report card is Capital, Asset quality, Management, Earnings, "
+        "Liquidity, Sensitivity to rates. Each is graded 1-5 from your "
+        "actual numbers (Risk & Reg shows the components).",
+        "risk",
+        [_goto("Open Risk & Reg", "risk")])
 
 
 _RULES = [
     _r_run_defense, _r_capital_repair, _r_rate_risk, _r_bsa_weak,
-    _r_deposit_lag, _r_funding_stretch, _r_late_cycle, _r_recession_cre,
+    _r_deposit_lag, _r_funding_stretch, _r_sell_mortgages, _r_late_cycle, _r_recession_cre,
     _r_hire_lender, _r_excess_cash, _r_uninsured_watch, _r_exam_prep,
     _r_fraud_weak, _r_core_old, _r_brand_decay, _r_hoarding,
 ]
@@ -623,9 +717,9 @@ def tutorial(state):
                  or "deposits" in acked, "tab": "deposits"},
         {"id": "memo", "title": "Decide a loan yourself",
          "text": "Big loan requests come to your desk with a credit memo — "
-                 "borrower, coverage ratio, collateral, an analyst's note. Read "
-                 "one and approve or decline it. (They appear in the inbox below "
-                 "and on the Lending tab; one shows up most months.)",
+                 "borrower, coverage ratio, collateral, an analyst's note. "
+                 "Approve, decline, counter (better rate / smaller hold), or "
+                 "participate a piece if you cannot fund the whole thing.",
          "done": (stats["approved_apps"] + stats["declined_apps"]) > 0
                  or "memo" in acked, "tab": "lending"},
         {"id": "bonds", "title": "Put idle cash to work",

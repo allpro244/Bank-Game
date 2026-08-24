@@ -15,6 +15,17 @@ class TestAdvisor(unittest.TestCase):
             engine.step_day(state)
             state["events"]["pending"].clear()
 
+    def test_day1_gauges_have_no_invented_roa(self):
+        state = new_game("Day1", seed=1)
+        g = advisor.gauges(state)
+        earn = next(x for x in g if x["key"] == "earnings")
+        self.assertEqual(earn["status"], "y")
+        blob = (earn["head"] + " " + earn["detail"]).lower()
+        self.assertTrue("opened" in blob or "scorecard" in blob)
+        self.assertNotRegex(earn["detail"], r"\d+\.\d+\s*%")
+        self.assertNotIn("SVB", json.dumps(g))
+        self.assertNotIn("Silicon Valley", json.dumps(advisor.cards(state)))
+
     def test_gauges_shape_and_stability(self):
         state = new_game("G", seed=42)
         for chunk in range(6):
@@ -25,6 +36,7 @@ class TestAdvisor(unittest.TestCase):
                 self.assertIn(x["status"], ("g", "y", "r"))
                 self.assertTrue(x["detail"])
                 self.assertTrue(x["tab"])
+                self.assertTrue(x.get("moved"), "gauge %s missing moved" % x["key"])
         json.dumps(g)   # must serialize
 
     def test_cards_actions_are_all_legal(self):
@@ -36,8 +48,12 @@ class TestAdvisor(unittest.TestCase):
                 self._run(state, 90)
                 for c in advisor.cards(state):
                     seen.add(c["id"])
+                    self.assertTrue(c["actions"], "card %s has no action" % c["id"])
                     for a in c["actions"]:
                         for s in a["steps"]:
+                            if s["kind"] == "goto":
+                                self.assertTrue(s.get("tab"))
+                                continue
                             if s["kind"] == "set":
                                 engine.set_policy(state, s["path"], s["value"])
                             else:

@@ -13,6 +13,9 @@ and burst on their own, CAMELS examinations with written reports, CECL
 reserving, FDIC-assisted failed-bank auctions, and bank runs that emerge
 from your actual condition — not from an event card.
 
+The model notes live in `DESIGN.md`. The build plan — what we fix,
+in what order, and what “done” means — lives in `ROADMAP.md`.
+
 ## How to run it (2 steps, no installs beyond Python)
 
 1. **Install Python 3.10 or newer** (if you don't have it):

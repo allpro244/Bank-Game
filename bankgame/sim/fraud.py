@@ -96,14 +96,15 @@ def step_month(state, rng):
                [["5170", rege, 0], ["1000", 0, rege]], tag="fraud")
     fr["losses_ytd"] += total_loss
 
-    # ---- individual cases ----
-    lam = 0.25 + assets / 4000 + fr["env"] * 0.2
-    if rng.chance(min(0.65, lam * 0.3)):
+    # ---- individual cases (rarer, meaner) ----
+    # Old cadence produced wallpaper (5–8 kiting cases in 3 years).
+    lam = 0.06 + assets / 12000 + fr["env"] * 0.05
+    if rng.chance(min(0.18, lam * 0.12)):
         events.append(_spawn_case(state, rng))
 
-    # big BEC hit if detection is weak
-    if det < 0.5 and rng.chance(0.03):
-        hit = int(min(assets, 4000) * rng.uniform(800, 4000))
+    # occasional six-figure wire when detection is weak
+    if det < 0.55 and rng.chance(0.012):
+        hit = int(min(max(assets, 20), 8000) * rng.uniform(2500, 9000))
         L.post(bank["ledger"], date, "BUSINESS EMAIL COMPROMISE wire loss",
                [["5160", hit, 0], ["1000", 0, hit]], tag="fraud")
         events.append({"type": "fraud_major", "blocking": True,
@@ -143,7 +144,7 @@ def _spawn_case(state, rng):
     kind, title, tmpl = rng.choice(CASE_TEMPLATES)
     name = "%s %s" % (rng.choice(FIRST), rng.choice(LAST))
     scale = max(1.0, (bank["cached_assets"] / 100 / 1_000_000 / 20) ** 0.5)
-    amt = int(rng.uniform(15_000, 220_000) * scale) * 100
+    amt = int(rng.uniform(40_000, 480_000) * scale) * 100
     case = {"id": fr["next_case_id"], "kind": kind, "name": name, "amount": amt,
             "opened": state["time"]["date"], "status": "open"}
     fr["next_case_id"] += 1
