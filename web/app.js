@@ -1748,7 +1748,8 @@ async function showSaves() {
         </select></div>
       <div class="ctl"><label>Goal</label>
         <select id="new-goal">
-          <option value="independent" selected>Stay independent 20 years</option>
+          <option value="world" selected>Biggest bank in the world</option>
+          <option value="independent">Stay independent 20 years</option>
           <option value="square">Best bank on the square</option>
           <option value="headline">Don't be the next headline</option>
           <option value="regional">Regional, not reckless</option>

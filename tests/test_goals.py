@@ -11,7 +11,7 @@ from bankgame.sim import deposits as DEP
 class TestGoals(unittest.TestCase):
     def test_defaults_and_display_date(self):
         state = new_game("G", seed=1)
-        self.assertEqual(state["meta"]["goal"], "independent")
+        self.assertEqual(state["meta"]["goal"], "world")
         self.assertEqual(state["meta"]["era"], "sandbox")
         self.assertEqual(state["meta"]["home"], "caprock")
         self.assertIn("Year 1", GOALS.display_date(state))
@@ -76,6 +76,26 @@ class TestGoals(unittest.TestCase):
         self.assertIsNotNone(ev)
         self.assertEqual(ev["type"], "goal_won")
         self.assertTrue(state["meta"]["goal_won"])
+
+    def test_world_goal_tracks_rank_and_can_win(self):
+        state = new_game("World", seed=8, goal="world")
+        p = GOALS.progress(state)
+        self.assertEqual(p["id"], "world")
+        self.assertIn("#", p["text"])
+        self.assertFalse(p["won"])
+        self.assertIsNone(GOALS.check_win(state))
+        old = GOALS.WORLD_CROWN
+        try:
+            GOALS.WORLD_CROWN = 1
+            for b in state["competitors"]["banks"]:
+                b["assets"] = 1
+            ev = GOALS.check_win(state)
+            self.assertIsNotNone(ev)
+            self.assertEqual(ev["type"], "goal_won")
+            self.assertIn("Biggest", ev["title"])
+            self.assertTrue(state["meta"]["goal_won"])
+        finally:
+            GOALS.WORLD_CROWN = old
 
     def test_summarize_save(self):
         state = new_game("Sum", seed=7, goal="square")

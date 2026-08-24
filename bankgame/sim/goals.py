@@ -4,7 +4,15 @@ from . import ledger as L
 from . import deposits as DEP
 from .regulation import capital_ratios, pca_category
 
+# G-SIB table in this model ($250B). You are not "in the world" until
+# you sit there *and* you are larger than every living rival.
+WORLD_CROWN = 250_000_000_000_00
+
 GOAL_SPECS = {
+    "world": {
+        "label": "Biggest bank in the world",
+        "blurb": "Pass every rival on the map, then pass $250 billion. Stay standing.",
+    },
     "independent": {
         "label": "Stay independent 20 years",
         "blurb": "Decline buyouts. Do not get seized. Still standing in year 20.",
@@ -50,9 +58,9 @@ COMP_OWNER = {
 }
 
 
-def attach(state, goal_id="independent"):
+def attach(state, goal_id="world"):
     if goal_id not in GOAL_SPECS:
-        goal_id = "independent"
+        goal_id = "world"
     state.setdefault("meta", {})
     state["meta"]["goal"] = goal_id
     state["meta"]["goal_won"] = False
@@ -101,8 +109,8 @@ def summarize_save(state):
     reg = state.get("regulation") or {}
     camels = (reg.get("camels") or {}).get("composite", 2)
     months = (state.get("economy") or {}).get("months", 0)
-    gid = (state.get("meta") or {}).get("goal", "independent")
-    spec = GOAL_SPECS.get(gid, GOAL_SPECS["independent"])
+    gid = (state.get("meta") or {}).get("goal", "world")
+    spec = GOAL_SPECS.get(gid, GOAL_SPECS["world"])
     prog = progress(state) if bank else {"text": spec["blurb"]}
     return {
         "assets": assets,
@@ -118,8 +126,8 @@ def summarize_save(state):
 
 
 def progress(state):
-    gid = (state.get("meta") or {}).get("goal", "independent")
-    spec = GOAL_SPECS.get(gid, GOAL_SPECS["independent"])
+    gid = (state.get("meta") or {}).get("goal", "world")
+    spec = GOAL_SPECS.get(gid, GOAL_SPECS["world"])
     months = state["economy"]["months"]
     years = months / 12.0
     won = bool(state["meta"].get("goal_won"))
@@ -142,6 +150,21 @@ def _progress_bits(state, gid, years):
     assets = r["assets"]
     m = state["metrics"][-1] if state["metrics"] else {}
     chron = state.get("chronicle") or _empty_chronicle()
+
+    if gid == "world":
+        race = world_race(state)
+        if race["beats_rivals"] and race["on_world_table"]:
+            bits = "You are #1 of %d and over $250B. The largest on the map." % race["field"]
+        elif race["beats_rivals"]:
+            bits = ("#1 of %d on the map. World table is $250B — you are at %s."
+                    % (race["field"], _fm_assets(race["me"])))
+        else:
+            bits = ("You are #%d of %d. %s is still %s ahead."
+                    % (race["rank"], race["field"], race["rival_name"],
+                       _fm_assets(race["rival_assets"] - race["me"])))
+        size = 0.55 * min(1.0, race["me"] / max(1, race["rival_assets"]))
+        crown = 0.45 * min(1.0, race["me"] / max(1, WORLD_CROWN))
+        return bits, size + crown
 
     if gid == "independent":
         return ("Year %.1f of 20. Still independent."
@@ -195,6 +218,42 @@ def _progress_bits(state, gid, years):
     return bits, min(0.5, years / 8.0 * 0.5) + (0.5 if chron.get("sale_multiple", 0) >= 1.8 else 0.0)
 
 
+def _fm_assets(cents):
+    dollars = max(0, int(cents)) // 100
+    if dollars >= 1_000_000_000_000:
+        return "$%.1fT" % (dollars / 1_000_000_000_000)
+    if dollars >= 1_000_000_000:
+        return "$%.1fB" % (dollars / 1_000_000_000)
+    if dollars >= 1_000_000:
+        return "$%.0fM" % (dollars / 1_000_000)
+    return "$%s" % f"{dollars:,}"
+
+
+def world_race(state):
+    """Where you stand vs living rivals and the $250B world table."""
+    me = L.total_assets(state["bank"]["ledger"])
+    alive = [b for b in (state.get("competitors") or {}).get("banks", [])
+             if b.get("alive")]
+    if alive:
+        top = max(alive, key=lambda b: b.get("assets") or 0)
+        rival_assets = int(top.get("assets") or 0)
+        rival_name = top.get("name") or "a rival"
+    else:
+        rival_assets = 0
+        rival_name = "no living rival"
+    ahead = sum(1 for b in alive if (b.get("assets") or 0) > me)
+    return {
+        "me": me,
+        "rival_assets": rival_assets,
+        "rival_name": rival_name,
+        "rank": 1 + ahead,
+        "field": 1 + len(alive),
+        "crown": WORLD_CROWN,
+        "beats_rivals": me > rival_assets,
+        "on_world_table": me >= WORLD_CROWN,
+    }
+
+
 def update_chronicle(state):
     """Call at month close. Cheap, no RNG."""
     chron = state.get("chronicle")
@@ -238,7 +297,7 @@ def check_win(state):
     """If the primary goal just completed, mark it and return an event dict."""
     if state["meta"].get("goal_won") or state.get("game_over"):
         return None
-    gid = state["meta"].get("goal", "independent")
+    gid = state["meta"].get("goal", "world")
     years = state["economy"]["months"] / 12.0
     chron = state.get("chronicle") or _empty_chronicle()
     r = capital_ratios(state)
@@ -246,7 +305,11 @@ def check_win(state):
     camels = state["regulation"]["camels"]["composite"]
     won = False
 
-    if gid == "independent":
+    if gid == "world":
+        race = world_race(state)
+        won = (race["beats_rivals"] and race["on_world_table"]
+               and not state["regulation"].get("seized"))
+    elif gid == "independent":
         won = years >= 20 and not state["regulation"].get("seized")
     elif gid == "square":
         if years >= 10 and camels <= 2:
