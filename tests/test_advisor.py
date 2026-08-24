@@ -36,6 +36,7 @@ class TestAdvisor(unittest.TestCase):
                 self.assertIn(x["status"], ("g", "y", "r"))
                 self.assertTrue(x["detail"])
                 self.assertTrue(x["tab"])
+                self.assertTrue(x.get("moved"), "gauge %s missing moved" % x["key"])
         json.dumps(g)   # must serialize
 
     def test_cards_actions_are_all_legal(self):

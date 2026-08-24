@@ -229,6 +229,13 @@ def _seed_first_credit(state):
         "market": home, "amount": amount, "rate": rate, "tier": "B",
         "dscr": 1.32, "ltv": 0.68, "memo": memo, "days_left": 90,
         "term_m": 60, "can_fund": True,
+        "why": "local operator, years in this county, deposits already here",
+        "rival": "First Cattlemen's Bank",
+        "dscr_gloss": "coverage is adequate — a dry year would pinch",
+        "ltv_gloss": "collateral has room",
+        "relationship_line": "House name. Operating and personal accounts already here.",
+        "exception": "Within published policy.",
+        "collateral": "crop liens, equipment, and ranch real estate",
     })
     LN.remember_relationship(state, "Culpepper Cattle Co.", home, "ag",
                              "known", {"amount": amount, "tier": "B"})

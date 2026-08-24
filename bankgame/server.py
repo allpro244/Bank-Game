@@ -42,6 +42,25 @@ class Game:
         mtd = statements.income_statement_mtd(s)
         curve = [(t, econ["curve"][str(t)]) for t in
                  [0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 7.0, 10.0, 20.0, 30.0]]
+        home_id = (s.get("meta") or {}).get("home", "")
+        home_name = (s.get("regions") or {}).get(home_id, {}).get("name", home_id)
+        lenders = bank["ops"]["staff"]["lenders"]["count"]
+        lr, _liquid = REG.liquidity_ratio(s)
+        if lr < 0.06:
+            cash_stance = "Cash is tight"
+        elif lr < 0.11:
+            cash_stance = "Cash is adequate"
+        else:
+            cash_stance = "Sitting on cash"
+        exam_mo = s["regulation"]["months_to_exam"]
+        if exam_mo <= 0:
+            exam_line = "Exam this month"
+        elif exam_mo == 1:
+            exam_line = "Examiners in 1 month"
+        else:
+            exam_line = "Examiners in %d months" % exam_mo
+        people = ("You are the only lender" if lenders <= 1
+                  else "%d lenders on the street" % lenders)
         return {
             "meta": s["meta"],
             "time": {**s["time"], "display": GOALS.display_date(s)},
@@ -90,6 +109,24 @@ class Game:
             "counts": {"loan_queue": len(bank["loans"]["queue"]),
                        "fraud_cases": len([c for c in bank["fraud"]["cases"]
                                            if c["status"] == "open"])},
+            "franchise": {
+                "home": home_name, "home_id": home_id,
+                "people": people, "lenders": lenders,
+                "cash": cash_stance, "liquidity_ratio": lr,
+                "exam": exam_line, "months_to_exam": exam_mo,
+            },
+            "unlock": {
+                "months_closed": len(s["metrics"]),
+                "branches": len([b for b in bank["ops"]["branches"]
+                                 if b.get("open")]),
+                "log_len": len(s["events"]["log"]),
+                "pending": len(s["events"]["pending"]),
+                "fraud_open": len([c for c in bank["fraud"]["cases"]
+                                   if c["status"] == "open"]),
+                "orders": bool(s["regulation"]["orders"]),
+                "months_to_exam": exam_mo,
+                "audit": bool(s["audit_alarm"]),
+            },
         }
 
     def section(self, name, args):
@@ -111,7 +148,7 @@ class Game:
                 "auto_policy": bank["loans"]["auto_policy"],
                 "mortgage_sale_frac": bank["loans"]["mortgage_sale_frac"],
                 "market_rates": home_rates,
-                "queue": bank["loans"]["queue"],
+                "queue": _queue_payload(bank["loans"]["queue"]),
                 "portfolio": LN.portfolio_stats(s),
                 "large": [l for l in bank["loans"]["large"]
                           if l["status"] not in ("paid", "defaulted")][-100:],
@@ -269,6 +306,8 @@ class Game:
                 }
             peers = competitors.peer_group(s)
             me_m = s["metrics"][-1] if s["metrics"] else {}
+            from .sim import operations as OPS
+            previews = {mid: OPS.preview_branch(s, mid) for mid in s["regions"]}
             return {
                 "regions": regions_out,
                 "econ_history": econ["history"][-360:],
@@ -285,6 +324,8 @@ class Game:
                        "npa_ratio": me_m.get("npa_ratio", 0),
                        "assets": bank["cached_assets"]},
                 "failed": s["competitors"]["failed_log"][-20:],
+                "previews": previews,
+                "kind_order": list(OPS.KIND_ORDER),
             }
 
         if name == "reports":
@@ -332,7 +373,7 @@ class Game:
                 "tutorial": ADV.tutorial(s),
                 "inbox": {
                     "events": s["events"]["pending"],
-                    "loans": bank["loans"]["queue"],
+                    "loans": _queue_payload(bank["loans"]["queue"]),
                     "fraud": open_cases,
                 },
                 "peer_avg": ADV.peer_averages(s),
@@ -348,6 +389,18 @@ class Game:
                     if s else []}
 
         return {"error": "unknown section %s" % name}
+
+
+def _queue_payload(queue):
+    """Copy applications and attach counter / participate previews."""
+    out = []
+    for app in queue:
+        a = dict(app)
+        a["counter_preview"] = LN.counter_terms(a)
+        hold, sold = LN.participate_hold(a)
+        a["participate_preview"] = {"hold": hold, "sold": sold}
+        out.append(a)
+    return out
 
 
 GAME = Game()

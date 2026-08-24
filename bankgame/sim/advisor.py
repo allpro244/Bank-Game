@@ -169,6 +169,38 @@ def gauges(state):
                    "depositors is how a run starts. Over 30%% is the danger zone.")
                   % (_fm(abs(unreal)), "less" if unreal < 0 else "more",
                      "losses" if unreal < 0 else "gains", ratio * 100)})
+
+    last = m
+    prior = state["metrics"][-2] if len(state["metrics"]) > 1 else {}
+
+    def _moved(key):
+        if not last:
+            return "Books just opened. Nothing has moved yet."
+        if not prior:
+            return "First closed month. Nothing to compare yet."
+        if key == "earnings":
+            a, b = last.get("roa"), prior.get("roa")
+            if a is None or b is None:
+                d = (last.get("nim", 0) - prior.get("nim", 0)) * 10000
+                return "%+.0f bp of lending margin this month." % d
+            return "%+.0f bp of return on assets this month." % ((a - b) * 10000)
+        if key == "capital":
+            d = (last.get("cet1_ratio", 0) - prior.get("cet1_ratio", 0)) * 10000
+            return "%+.0f bp of core capital this month." % d
+        if key == "liquidity":
+            d = (last.get("liquidity_ratio", 0) - prior.get("liquidity_ratio", 0)) * 100
+            return "%+.1f points of ready cash this month." % d
+        if key == "credit":
+            d = (last.get("npa_ratio", 0) - prior.get("npa_ratio", 0)) * 10000
+            return "%+.0f bp of bad loans this month." % d
+        if key == "regulators":
+            return "Exam clock: %d months." % max(0, reg["months_to_exam"])
+        if key == "raterisk":
+            return "Marks move with the curve — open the bond book for the lots."
+        return ""
+
+    for item in out:
+        item["moved"] = _moved(item["key"])
     return out
 
 

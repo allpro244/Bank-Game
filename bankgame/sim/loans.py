@@ -591,7 +591,12 @@ def _make_application(state, rng, market_id, thr):
             "dscr": dscr, "ltv": ltv, "memo": memo, "days_left": 60,
             "term_m": TERM_M.get(product, 60) or 60,
             "can_fund": can_fund,
-            "returning": bool(rel)}
+            "returning": bool(rel),
+            "why": why, "rival": rival,
+            "dscr_gloss": dscr_gloss, "ltv_gloss": ltv_gloss,
+            "relationship_line": rel_line,
+            "exception": (exception.strip() or "Within published policy."),
+            "collateral": coll}
 
 
 def _book_large(state, app, amount, rate, term_m, auto=False, participated=0):

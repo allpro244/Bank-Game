@@ -104,6 +104,22 @@ class TestCredit(unittest.TestCase):
                                     "Culpepper Cattle Co.")
         self.assertIsNotNone(rel)
 
+    def test_applications_carry_structured_memo_fields(self):
+        state = new_game("Memo", seed=1)
+        app = state["bank"]["loans"]["queue"][0]
+        self.assertEqual(app["name"], "Culpepper Cattle Co.")
+        for k in ("why", "rival", "dscr_gloss", "ltv_gloss",
+                  "relationship_line", "exception", "collateral"):
+            self.assertTrue(app.get(k), "missing %s" % k)
+        gen = LN._make_application(state, engine._rng(state, "credit"),
+                                   "caprock", 200_000_00)
+        if gen:
+            for k in ("why", "rival", "dscr_gloss", "ltv_gloss", "collateral"):
+                self.assertIn(k, gen)
+            terms = LN.counter_terms(gen)
+            self.assertLess(terms["amount"], gen["amount"])
+            self.assertGreater(terms["rate"], gen["rate"])
+
     def test_mortgage_preview_and_advisor_card_is_a_legal_set(self):
         state = new_game("Mort", seed=5)
         prev = LN.mortgage_sale_preview(state, 0.50)
