@@ -142,6 +142,10 @@ archives kept forever (capped at 100 years) for statements.
 
 ## Ideas for the next depth pass
 
+These are queued as **Phase H** in `ROADMAP.md` and wait until the
+unfair-death and first-session work (Phases A–E) is shipped. Do not
+start them to avoid finishing A.
+
 - Per-market deposit pricing (offsets by market, promo money).
 - Loan sales/participations and a securitization shelf.
 - Competitor M&A against the player's targets; hostile offers.
