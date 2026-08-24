@@ -12,7 +12,7 @@ RNG_STREAMS = ["econ", "region", "credit", "deposit", "fraud", "comp", "ops",
 
 
 def new_game(name="First National Bank of Caprock", seed=12345,
-             home="caprock", difficulty="standard", goal="independent",
+             home="caprock", difficulty="standard", goal="world",
              era="sandbox"):
     from . import goals as GOALS
     if home not in dict(GOALS.HOME_CHOICES):
