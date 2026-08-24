@@ -5,6 +5,7 @@ import unittest
 from bankgame.sim.newgame import new_game
 from bankgame.sim import engine, ledger as L
 from bankgame.sim import funding as FUND
+from bankgame.sim import loans as LN
 
 
 def _drain_cash(state, hole):
@@ -55,6 +56,38 @@ class TestFundingDecisions(unittest.TestCase):
         self.assertEqual(L.trial_balance(state["bank"]["ledger"]), 0)
         self.assertFalse(any(e.get("type") == "overnight_shortfall" for e in evs))
 
+    def test_fed_balances_cover_a_vault_hole_without_a_popup(self):
+        """$800k at the Fed is the bank's money. Do not ask to borrow it."""
+        state = new_game("Fed", seed=5)
+        led = state["bank"]["ledger"]
+        date = state["time"]["date"]
+        # leave 1010 intact; drain only vault and FFS so vault goes negative
+        if led["balances"]["1100"] > 0:
+            L.post(led, date, "test: drain ffs",
+                   [["1000", led["balances"]["1100"], 0],
+                    ["1100", 0, led["balances"]["1100"]]], tag="test")
+        fed = led["balances"]["1010"]
+        self.assertGreater(fed, 200_000_00)
+        hole = 150_000_00
+        L.post(led, date, "test: vault hole smaller than Fed balances",
+               [["5170", led["balances"]["1000"] + hole, 0],
+                ["1000", 0, led["balances"]["1000"] + hole]], tag="test")
+        self.assertLess(led["balances"]["1000"], 0)
+        evs = FUND.manage_overnight(state)
+        self.assertFalse(any(e.get("type") == "overnight_shortfall" for e in evs))
+        self.assertGreaterEqual(led["balances"]["1000"], 0)
+        self.assertLess(led["balances"]["1010"], fed)
+        self.assertEqual(L.trial_balance(led), 0)
+
+    def test_shortfall_need_is_only_the_remaining_hole(self):
+        state = new_game("Hole", seed=5)
+        _drain_cash(state, 800_000_00)
+        evs = FUND.manage_overnight(state)
+        short = [e for e in evs if e.get("type") == "overnight_shortfall"]
+        self.assertTrue(short)
+        # no extra cash-target cushion on top of the settlement hole
+        self.assertEqual(short[0]["need"], 800_000_00)
+
     def test_wait_leaves_uses_unchanged(self):
         state = new_game("Wait", seed=7)
         uses = state["bank"]["funding"]["discount_window_uses"]
@@ -64,6 +97,29 @@ class TestFundingDecisions(unittest.TestCase):
         engine.perform_action(state, "event_choice",
                               {"event_id": ev["id"], "choice": "wait"})
         self.assertEqual(state["bank"]["funding"]["discount_window_uses"], uses)
+        self.assertTrue(state["bank"]["funding"].get("shrink_originations"))
+
+    def test_wait_shrinks_next_month_originations(self):
+        a = new_game("A", seed=9)
+        b = new_game("B", seed=9)
+        a["bank"]["loans"]["queue"].clear()
+        b["bank"]["loans"]["queue"].clear()
+        b["bank"]["funding"]["shrink_originations"] = True
+        LN.originate_month(a, engine._rng(a, "credit"))
+        LN.originate_month(b, engine._rng(b, "credit"))
+        self.assertLess(b["bank"]["loans"]["stats"]["originated_mtd"],
+                        a["bank"]["loans"]["stats"]["originated_mtd"])
+        self.assertFalse(b["bank"]["funding"].get("shrink_originations"))
+
+    def test_overnight_fhlb_is_three_months(self):
+        state = new_game("Term", seed=5)
+        _drain_cash(state, 800_000_00)
+        evs = FUND.manage_overnight(state)
+        ev = engine.push_event(state, evs[0])
+        engine.perform_action(state, "event_choice",
+                              {"event_id": ev["id"], "choice": "fhlb"})
+        self.assertEqual(state["bank"]["funding"]["fhlb"][-1]["months_left"],
+                         FUND.OVERNIGHT_FHLB_MONTHS)
 
 
 if __name__ == "__main__":

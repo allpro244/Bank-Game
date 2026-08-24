@@ -1043,11 +1043,13 @@ def _resolve_overnight_choice(state, ev, choice):
     if cash < 0:
         need = max(need, -cash)
     if choice == "wait":
-        return {"message": "You left the hole open. Cover it from Treasury, or "
-                           "the clock will stop again tomorrow."}
+        state["bank"]["funding"]["shrink_originations"] = True
+        return {"message": "You left the hole open. Next month's idle "
+                           "originations will shrink. Cover it from Treasury, "
+                           "or the clock will stop again tomorrow."}
     if choice == "fhlb":
         take = max(100_000_00, (need + 99_999_00) // 100_000_00 * 100_000_00)
-        res = FUND.take_fhlb(state, take, 1)
+        res = FUND.take_fhlb(state, take, FUND.OVERNIGHT_FHLB_MONTHS)
         if isinstance(res, str):
             raise ActionError(res)
         return {"message": "FHLB advance drawn to cover the overnight hole."}

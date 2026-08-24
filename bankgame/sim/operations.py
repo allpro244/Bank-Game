@@ -248,6 +248,8 @@ def monthly_opex(state, rng):
     date = state["time"]["date"]
     events = []
 
+    from .funding import ensure_cash
+
     # salaries (inflation-indexed drift annually via salary bases)
     sal_total = 0
     for r in ROLES:
@@ -257,6 +259,7 @@ def monthly_opex(state, rng):
     # benefits load
     sal_total = int(sal_total * 1.38)
     if sal_total > 0:
+        ensure_cash(state, sal_total)
         L.post(bank["ledger"], date, "Payroll and benefits",
                [["5100", sal_total, 0], ["1000", 0, sal_total]], tag="ops")
 
@@ -265,6 +268,7 @@ def monthly_opex(state, rng):
     prem = bank["ledger"]["balances"]["1500"]
     dep = int(prem * 0.03 / 12)
     if occ > 0:
+        ensure_cash(state, occ)
         L.post(bank["ledger"], date, "Occupancy and equipment",
                [["5110", occ, 0], ["1000", 0, occ]], tag="ops")
     if dep > 0:
@@ -274,6 +278,7 @@ def monthly_opex(state, rng):
     assets = max(bank["cached_assets"], 20_000_000_00)
     tech = int(assets * 0.0026 / 12) + ops["cyber_spend"] \
         + int(ops["digital_level"] * 25_000_00) + ops["audit_spend"]
+    ensure_cash(state, tech)
     L.post(bank["ledger"], date, "Technology, data processing, audit",
            [["5120", tech, 0], ["1000", 0, tech]], tag="ops")
 
@@ -281,6 +286,7 @@ def monthly_opex(state, rng):
     # exams, professional fees, franchise taxes. Sized so a passive
     # community book lands near a real 1% ROA, not a 2.5% printer.
     other = int(assets * 0.0110 / 12) + 12_000_00
+    ensure_cash(state, other)
     L.post(bank["ledger"], date, "Other operating expense",
            [["5170", other, 0], ["1000", 0, other]], tag="ops")
 
