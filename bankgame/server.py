@@ -472,7 +472,7 @@ class Handler(BaseHTTPRequestHandler):
                         name, seed,
                         home=str(body.get("home") or "caprock"),
                         difficulty=str(body.get("difficulty") or "standard"),
-                        goal=str(body.get("goal") or "independent"),
+                        goal=str(body.get("goal") or "world"),
                         era=str(body.get("era") or "sandbox"))
                     if body.get("guided") is False:
                         from .sim import advisor as _adv
