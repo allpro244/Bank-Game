@@ -105,7 +105,7 @@ const $ = id => document.getElementById(id);
 const esc = s => String(s == null ? '' : s)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 // JSON safe to embed inside a single-quoted HTML attribute
-const jattr = o => JSON.stringify(o).replace(/&/g, '\\u0026')
+const jattr = o => JSON.stringify(o ?? null).replace(/&/g, '\\u0026')
   .replace(/'/g, '&#39;').replace(/</g, '\\u003c');
 
 function fm(cents) {           // full dollars with commas
@@ -1476,13 +1476,14 @@ async function tabMarkets(m) {
       <div class="helptip">Click any bank to open its full call-report books — the same shape as your Reports tab.</div>
       <table><tr><th>Bank</th><th>Strategy</th><th class="r">Assets</th>
         <th class="r">${dt('cet1', MODE === 'owner' ? 'Capital' : 'Capital')}</th>
-        <th class="r">${dt('npa')}</th><th class="r">${dt('roa')}</th></tr>
-      ${d.competitors.map(b => `<tr class="click ${b.alive ? '' : 'sub'}" onclick="openRival(${jattr(b.id)})">
+        <th class="r">${dt('npa')}</th><th class="r">${dt('roa')}</th><th></th></tr>
+      ${(d.competitors || []).filter(b => b.id).map(b => `<tr class="click ${b.alive ? '' : 'sub'}" onclick='openRival(${jattr(b.id)})'>
         <td>${esc(b.name)}${b.alive ? '' : ' †'}</td><td>${esc(rivalStratLabel(b.strategy))}</td>
         <td class="r">${fmc(b.assets)}</td>
         <td class="r ${b.equity_ratio < 0.06 ? 'neg' : ''}">${pct(b.equity_ratio, 1)}</td>
         <td class="r ${b.npa_ratio > 0.04 ? 'neg' : ''}">${pct(b.npa_ratio, 1)}</td>
-        <td class="r ${cls(b.roa)}">${pct(b.roa)}</td></tr>`).join('')}
+        <td class="r ${cls(b.roa)}">${pct(b.roa)}</td>
+        <td><button class="small" onclick='event.stopPropagation();openRival(${jattr(b.id)})'>Books</button></td></tr>`).join('')}
       </table>
       ${d.failed.length ? `<div class="sub" style="margin-top:6px">Failures: ${d.failed.map(f => esc(f.name)).join(', ')}</div>` : ''}
     </div>
@@ -1495,7 +1496,7 @@ async function tabMarkets(m) {
         <td class="r">${fmc(d.me.assets)}</td><td class="r">${pct(d.me.roa)}</td>
         <td class="r">${pct(d.me.nim)}</td><td class="r">${pct(d.me.efficiency, 0)}</td>
         <td class="r">${pct(d.me.npa_ratio)}</td></tr>
-      ${d.peers.map(b => `<tr class="click" onclick="openRival(${jattr(b.id)})">
+      ${(d.peers || []).filter(b => b.id).map(b => `<tr class="click" onclick='openRival(${jattr(b.id)})'>
         <td>${esc(b.name)}</td><td class="r">${fmc(b.assets)}</td>
         <td class="r">${pct(b.roa)}</td><td class="r">${pct(b.nim)}</td>
         <td class="r">${pct(b.efficiency, 0)}</td><td class="r">${pct(b.npa_ratio)}</td></tr>`).join('')}
@@ -1594,8 +1595,10 @@ function rivalLine(label) {
 }
 
 async function openRival(id) {
+  if (!id) { toast('That bank has no books.', true); return; }
   try {
     const d = await api('/api/section?name=rival&id=' + encodeURIComponent(id));
+    if (!d || !d.balance_sheet) throw d && d.error ? d.error : 'no books returned';
     showRivalBooks(d);
   } catch (e) { toast(String(e), true); }
 }
