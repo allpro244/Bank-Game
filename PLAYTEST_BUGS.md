@@ -1,5 +1,11 @@
 # Playtest bug report — post-PR-3 build
 
+**Status (2026-08-24):** All 12 items below plus the owner-facing bugs from
+the parallel playtest (cash labels, branch confirms, Continue HTML, tour
+welcome, Saves keydown, home-market deposit rates, last/duplicate branch,
+world-goal bar) are fixed on `cursor/playtest-bugfixes-e5c4`. This file
+stays as the original worklist.
+
 Found during a scripted + browser bug-hunt playthrough of the merged branch
 (PR 1 "Playtest fixes A–G" + PR 3 "overnight cash fix", head `1b7a976`).
 Method: three headless playthroughs (an active sensible owner for 15y, an

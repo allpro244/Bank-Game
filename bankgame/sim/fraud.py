@@ -29,7 +29,7 @@ def new_fraud():
         "prevention_spend": 3_000_00,   # monthly, player lever
         "threshold": 2,                 # 0 loose .. 4 tight, player lever
         "env": 1.0,                     # ambient fraud intensity, drifts
-        "false_positive_drag": 0.01,
+        "false_positive_drag": 0.006,   # (threshold-1)*0.006 at default 2
         "cases": [],                    # open cases for the player
         "next_case_id": 1,
         "losses_ytd": 0,
@@ -157,6 +157,27 @@ def _spawn_case(state, rng):
             "case_id": case["id"], "choices": ["act", "monitor"]}
 
 
+def prune_resolved_events(state):
+    """Drop pending fraud_case events whose case is no longer open.
+
+    Desk Act/Watch closes the case without going through event_choice, so
+    the inbox event used to linger — badge stuck, clock still stopping,
+    and a second click raised 'already closed'.
+    """
+    cases = ((state.get("bank") or {}).get("fraud") or {}).get("cases") or []
+    open_ids = {c.get("id") for c in cases if c.get("status") == "open"}
+    pend = (state.get("events") or {}).get("pending")
+    if not pend:
+        return 0
+    keep = [e for e in pend
+            if not (e.get("type") == "fraud_case"
+                    and e.get("case_id") not in open_ids)]
+    dropped = len(pend) - len(keep)
+    if dropped:
+        pend[:] = keep
+    return dropped
+
+
 def resolve_case(state, case_id, action, rng):
     """action: 'act' (freeze/intervene) or 'monitor'."""
     bank = state["bank"]
@@ -167,7 +188,9 @@ def resolve_case(state, case_id, action, rng):
             case = c
             break
     if case is None:
-        return "case not found or already closed"
+        prune_resolved_events(state)
+        return {"message": "This case is already closed.", "loss": 0,
+                "already": True}
     det = detection_rate(state)
     date = state["time"]["date"]
     if action == "act":
@@ -193,4 +216,5 @@ def resolve_case(state, case_id, action, rng):
     case["outcome"] = msg
     fr["cases_resolved"] += 1
     state["regulation"]["bsa"]["sars_filed"] += 1
+    prune_resolved_events(state)
     return {"message": msg, "loss": total}

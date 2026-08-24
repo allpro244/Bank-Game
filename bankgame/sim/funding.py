@@ -17,6 +17,15 @@ from .economy import yield_at
 # comes due on the same morning as next month's originations.
 OVERNIGHT_FHLB_MONTHS = 3
 
+# Market capacity: a $20M courthouse bank cannot place $1T of paper.
+# Multiples are of today's book, so a real raise still fits ($5M on ~$2.5M TBV).
+MAX_COMMON_RAISE_MULT = 3.0          # single common issue vs tangible book
+MAX_PREFERRED_VS_CET1 = 1.0          # preferred outstanding vs CET1
+MAX_SUBDEBT_VS_CET1 = 1.0            # subdebt outstanding vs CET1
+MAX_BROKERED_VS_CORE = 0.30          # brokered outstanding vs core deposits
+OVERNIGHT_WAIT_DAYS = 21
+OVERDRAFT_PENALTY_BP = 0.015         # fed funds + 150bp on a negative vault
+
 
 def new_funding():
     return {
@@ -81,6 +90,17 @@ def take_fhlb(state, amount, term_months):
     return {"rate": rate}
 
 
+def _core_deposits(state):
+    led = state["bank"]["ledger"]
+    return max(0, L.total_deposits(led) + led["balances"]["2050"])
+
+
+def brokered_room(state):
+    outstanding = sum(a["amount"] for a in state["bank"]["funding"]["brokered"])
+    cap = int(_core_deposits(state) * MAX_BROKERED_VS_CORE)
+    return max(0, cap - outstanding)
+
+
 def issue_brokered(state, amount, term_months):
     bank = state["bank"]
     reg = state["regulation"]
@@ -90,6 +110,10 @@ def issue_brokered(state, amount, term_months):
         return "adequately-capitalized banks need an FDIC waiver for brokered deposits (not granted)"
     if amount < 250_000_00:
         return "minimum brokered issuance $250,000"
+    room = brokered_room(state)
+    if amount > room:
+        return "brokered book would exceed 30%% of core deposits ($%s room)" % \
+            f"{room // 100:,}"
     f = bank["funding"]
     rate = round(yield_at(state["economy"], max(0.25, term_months / 12.0)) + 0.0040, 5)
     f["brokered"].append({"id": f["next_id"], "amount": amount, "rate": rate,
@@ -102,16 +126,29 @@ def issue_brokered(state, amount, term_months):
     return {"rate": rate}
 
 
+def _cet1(state):
+    from .regulation import capital_ratios
+    return max(1, capital_ratios(state)["cet1"])
+
+
 def issue_subdebt(state, amount, term_years=10):
     bank = state["bank"]
     econ = state["economy"]
     if amount < 1_000_000_00:
         return "minimum subordinated debt issue $1,000,000"
+    outstanding = sum(a["amount"] for a in bank["funding"]["subdebt"])
+    room = max(0, int(_cet1(state) * MAX_SUBDEBT_VS_CET1) - outstanding)
+    if amount > room:
+        return "subordinated debt would exceed common equity ($%s room)" % \
+            f"{room // 100:,}"
+    cost = int(amount * 0.015)   # underwriting
+    equity = L.total_equity(bank["ledger"])
+    if cost >= max(1, equity):
+        return "underwriting fee would wipe out equity"
     health_spread = 0.02 + state["regulation"]["camels"]["composite"] * 0.006 \
         + econ["credit_stress"] * 0.03
     rate = round(yield_at(econ, term_years) + health_spread, 5)
     f = bank["funding"]
-    cost = int(amount * 0.015)   # underwriting
     f["subdebt"].append({"id": f["next_id"], "amount": amount, "rate": rate,
                          "months_left": term_years * 12})
     f["next_id"] += 1
@@ -124,7 +161,10 @@ def issue_subdebt(state, amount, term_years=10):
 def repay(state, kind, item_id):
     bank = state["bank"]
     f = bank["funding"]
-    acct = {"fhlb": "2100", "brokered": "2050", "subdebt": "2200"}[kind]
+    accts = {"fhlb": "2100", "brokered": "2050", "subdebt": "2200"}
+    if kind not in accts:
+        return "unknown funding kind"
+    acct = accts[kind]
     for item in f[kind]:
         if item["id"] == item_id:
             if ensure_cash(state, item["amount"]) < item["amount"]:
@@ -171,6 +211,15 @@ def accrue_day(state, days):
     if sub_int > 0:
         L.post(ledger, date, "Subordinated debt interest accrual",
                [["5020", sub_int, 0], ["2300", 0, sub_int]], tag="int")
+
+    # Uncovered vault overdraft (ask-policy "wait") is not free money.
+    vault = ledger["balances"]["1000"]
+    if vault < 0:
+        od = int(round((-vault) * (econ["fed_funds"] + OVERDRAFT_PENALTY_BP)
+                       * days / 365.0))
+        if od > 0:
+            L.post(ledger, date, "Daylight overdraft interest (vault)",
+                   [["5010", od, 0], ["2300", 0, od]], tag="int")
 
     # interest on cash held at the Fed (IOR on balances parked in 1010)
     ior_bal = ledger["balances"]["1010"] + ledger["balances"]["1100"]
@@ -259,17 +308,16 @@ def manage_overnight(state):
                     used_fhlb = take
                     need -= take
         if policy == "auto" and need > 0:
-            limit = _ff_purchase_limit(state)
-            already = -ledger["balances"]["2110"]
-            take = max(0, min(need, limit - already))
-            if take > 0:
-                L.post(ledger, date, "Fed funds purchased (overnight)",
-                       [["1000", take, 0], ["2110", 0, take]], tag="fund")
-                need -= take
+            take = take_fed_funds(state, need)
+            need -= take
         if need > 0 and policy != "auto":
             already = any(e.get("type") == "overnight_shortfall"
                           for e in state["events"]["pending"])
-            if not already:
+            wait_until = bank["funding"].get("overnight_wait_until")
+            last_need = int(bank["funding"].get("overnight_wait_need") or 0)
+            waiting = bool(wait_until and date <= wait_until
+                           and need <= int(last_need * 1.5) + 50_000_00)
+            if not already and not waiting:
                 events.append({
                     "type": "overnight_shortfall",
                     "blocking": True,
@@ -278,8 +326,11 @@ def manage_overnight(state):
                     "text": ("We are short $%s overnight after using vault cash, "
                              "fed-funds-sold, and balances at the Fed. The clock "
                              "stops so you can choose: draw a 3-month FHLB advance, "
-                             "borrow fed funds, use the discount window, or wait "
-                             "and shrink next month's originations.\n\n"
+                             "borrow fed funds (capped by counterparties), use the "
+                             "discount window, or wait — wait covers what the "
+                             "fed-funds market will take, charges a penalty on any "
+                             "leftover overdraft, shrinks originations, and will "
+                             "not nag you every morning.\n\n"
                              "The window is not drawn until you pick it. Examiners "
                              "count every use."
                              % f"{need // 100:,}"),
@@ -330,6 +381,20 @@ def _ff_purchase_limit(state):
     return base
 
 
+def take_fed_funds(state, amount, memo="Fed funds purchased (overnight)"):
+    """Borrow overnight FF up to the counterparty limit. Returns amount taken."""
+    if amount <= 0:
+        return 0
+    ledger = state["bank"]["ledger"]
+    already = -ledger["balances"]["2110"]
+    take = max(0, min(amount, _ff_purchase_limit(state) - already))
+    if take <= 0:
+        return 0
+    L.post(ledger, state["time"]["date"], memo,
+           [["1000", take, 0], ["2110", 0, take]], tag="fund")
+    return take
+
+
 # --------------------------------------------------------------- capital
 
 def raise_common(state, amount):
@@ -337,6 +402,12 @@ def raise_common(state, amount):
     reg = state["regulation"]
     if amount < 500_000_00:
         return "minimum raise $500,000"
+    equity = L.total_equity(bank["ledger"])
+    tbv = max(1, equity - bank["ledger"]["balances"]["1600"])
+    cap = int(tbv * MAX_COMMON_RAISE_MULT)
+    if amount > cap:
+        return "investors will not take a raise above %.0fx tangible book ($%s cap)" % (
+            MAX_COMMON_RAISE_MULT, f"{cap // 100:,}")
     # pricing: healthy banks raise near/above book; sick banks deeply dilutive
     health = 1.0
     if reg["camels"]["composite"] >= 4:
@@ -345,13 +416,15 @@ def raise_common(state, amount):
         health = 0.8
     if state["economy"]["credit_stress"] > 0.4:
         health *= 0.8
-    equity = L.total_equity(bank["ledger"])
-    tbv = max(1, equity - bank["ledger"]["balances"]["1600"])
-    price_to_book = max(0.3, min(2.2, 1.15 * health * (1.0 + bank.get("roe_ttm", 0.08))))
+    # A raise that is large vs book clears at a worse price.
+    size_hit = min(1.0, 0.55 + 0.45 * (tbv / max(1, amount)))
+    price_to_book = max(0.3, min(2.2, 1.15 * health * (1.0 + bank.get("roe_ttm", 0.08)) * size_hit))
     shares_out = bank["shares"]
     px = max(1, int(tbv / shares_out * price_to_book))
     new_shares = amount // px
     fees = int(amount * 0.05)
+    if fees >= max(1, equity):
+        return "underwriting fee would wipe out equity"
     L.post(bank["ledger"], state["time"]["date"],
            "Common equity raised ($%s at %.2fx book)" % (f"{amount // 100:,}", price_to_book),
            [["1000", amount - fees, 0], ["5170", fees, 0], ["3000", 0, amount]], tag="cap")
@@ -363,10 +436,16 @@ def issue_preferred(state, amount):
     bank = state["bank"]
     if amount < 1_000_000_00:
         return "minimum preferred issue $1,000,000"
+    outstanding = -bank["ledger"]["balances"]["3050"]
+    room = max(0, int(_cet1(state) * MAX_PREFERRED_VS_CET1) - outstanding)
+    if amount > room:
+        return "preferred would exceed common equity ($%s room)" % f"{room // 100:,}"
+    fees = int(amount * 0.03)
+    if fees >= max(1, L.total_equity(bank["ledger"])):
+        return "underwriting fee would wipe out equity"
     econ = state["economy"]
     rate = round(yield_at(econ, 10) + 0.035, 5)
     bank["preferred_rate"] = rate
-    fees = int(amount * 0.03)
     L.post(bank["ledger"], state["time"]["date"],
            "Preferred stock issued ($%s @ %.2f%%)" % (f"{amount // 100:,}", rate * 100),
            [["1000", amount - fees, 0], ["5170", fees, 0], ["3050", 0, amount]], tag="cap")

@@ -13,6 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from .store import Store
 from .sim import engine, ledger as L, statements, securities, competitors
 from .sim import deposits as DEP, loans as LN, regulation as REG, funding as FUND
+from .sim import fraud as FR
 from .sim import advisor as ADV
 from .sim.newgame import new_game
 from .sim import goals as GOALS
@@ -35,6 +36,7 @@ class Game:
         s = self.state
         if s is None:
             return {"no_game": True, "saves": self.store.list_saves()}
+        FR.prune_resolved_events(s)
         bank = s["bank"]
         ledger = bank["ledger"]
         econ = s["economy"]
@@ -46,10 +48,16 @@ class Game:
         home_name = (s.get("regions") or {}).get(home_id, {}).get("name", home_id)
         lenders = bank["ops"]["staff"]["lenders"]["count"]
         lr, _liquid = REG.liquidity_ratio(s)
-        if lr < 0.06:
+        spendable = (ledger["balances"]["1000"] + ledger["balances"]["1010"]
+                     + ledger["balances"]["1100"])
+        assets_now = max(1, L.total_assets(ledger))
+        sr = spendable / assets_now
+        if sr < 0.03 or lr < 0.06:
             cash_stance = "Cash is tight"
-        elif lr < 0.11:
+        elif sr < 0.06:
             cash_stance = "Cash is adequate"
+        elif sr < 0.08 and lr >= 0.11:
+            cash_stance = "Bonds, not cash"
         else:
             cash_stance = "Sitting on cash"
         exam_mo = s["regulation"]["months_to_exam"]
@@ -76,6 +84,9 @@ class Game:
                 "equity": L.total_equity(ledger),
                 "cash": ledger["balances"]["1000"] + ledger["balances"]["1010"]
                         + ledger["balances"]["1100"],
+                "vault": ledger["balances"]["1000"],
+                "fed_balances": ledger["balances"]["1010"],
+                "fed_funds_sold": ledger["balances"]["1100"],
                 "ni_mtd": mtd["net_income"],
                 "shares": bank["shares"],
                 "aoci": -ledger["balances"]["3200"],
@@ -133,6 +144,7 @@ class Game:
         s = self.state
         if s is None:
             return {"error": "no game loaded"}
+        FR.prune_resolved_events(s)
         bank = s["bank"]
         ledger = bank["ledger"]
         econ = s["economy"]
@@ -150,8 +162,11 @@ class Game:
                 "market_rates": home_rates,
                 "queue": _queue_payload(bank["loans"]["queue"]),
                 "portfolio": LN.portfolio_stats(s),
-                "large": [l for l in bank["loans"]["large"]
-                          if l["status"] not in ("paid", "defaulted")][-100:],
+                "large": [
+                    {**l, "market_name": (s.get("regions") or {}).get(
+                        l.get("market"), {}).get("name", l.get("market"))}
+                    for l in bank["loans"]["large"]
+                    if l["status"] not in ("paid", "defaulted")][-100:],
                 "oreo": bank["loans"]["oreo"],
                 "allowance": L.allowance(ledger),
                 "reserve_required": bank["loans"]["reserve_required"],
@@ -181,7 +196,8 @@ class Game:
                 "fees": bank["deposits"]["fees"],
                 "totals": DEP.totals(bank["deposits"]),
                 "pools": pools_by_market,
-                "market_rates": competitors.market_rates(s, "caprock")["deposit"],
+                "market_rates": competitors.market_rates(
+                    s, (s.get("meta") or {}).get("home", "caprock"))["deposit"],
                 "mmf_rate": econ["mmf_rate"],
                 "cost_of_deposits": DEP.cost_of_deposits(s),
                 "uninsured": DEP.uninsured_share(s),
@@ -208,7 +224,10 @@ class Game:
                             "ffp": -ledger["balances"]["2110"],
                             "dw": -ledger["balances"]["2120"],
                             "dw_uses": bank["funding"]["discount_window_uses"]},
-                "cash": ledger["balances"]["1000"],
+                "cash": (ledger["balances"]["1000"] + ledger["balances"]["1010"]
+                         + ledger["balances"]["1100"]),
+                "vault": ledger["balances"]["1000"],
+                "fed_balances": ledger["balances"]["1010"],
                 "fed_funds_sold": ledger["balances"]["1100"],
                 "liquidity_ratio": lr, "liquid_assets": liquid,
                 "shares": bank["shares"],
@@ -244,6 +263,9 @@ class Game:
                             for mid, r in s["regions"].items()},
                 "previews": previews,
                 "kind_order": list(OPS.KIND_ORDER),
+                "digital_next_cost": OPS.digital_upgrade_cost(
+                    bank["ops"]["digital_level"]),
+                "core_cost": OPS.core_upgrade_cost(bank["cached_assets"]),
             }
 
         if name == "risk":
@@ -272,7 +294,8 @@ class Game:
                     "env": bank["fraud"]["env"],
                     "losses_by_channel": bank["fraud"]["losses_by_channel"],
                     "cases": bank["fraud"]["cases"][-20:],
-                    "false_positive_drag": bank["fraud"]["false_positive_drag"],
+                    "false_positive_drag": round(
+                        max(0.0, (bank["fraud"]["threshold"] - 1) * 0.006), 4),
                 },
                 "bsa": s["regulation"]["bsa"],
                 "thresholds": {
@@ -312,11 +335,11 @@ class Game:
                 "regions": regions_out,
                 "econ_history": econ["history"][-360:],
                 "competitors": [{k: b[k] for k in
-                                 ("name", "strategy", "assets", "equity_ratio",
+                                 ("id", "name", "strategy", "assets", "equity_ratio",
                                   "npa_ratio", "roa", "nim", "efficiency", "alive",
                                   "markets")}
                                 for b in s["competitors"]["banks"]],
-                "peers": [{k: b[k] for k in ("name", "assets", "roa", "nim",
+                "peers": [{k: b[k] for k in ("id", "name", "assets", "roa", "nim",
                                              "efficiency", "npa_ratio", "equity_ratio")}
                           for b in peers],
                 "me": {"roa": me_m.get("roa", 0), "nim": me_m.get("nim", 0),
@@ -341,6 +364,13 @@ class Game:
                 "cash_flow": statements.cash_flow_statement(s),
                 "months": ledger["months"][-24:],
             }
+
+        if name == "rival":
+            bid = (args.get("id") or [""])[0]
+            books = competitors.rival_books(s, bid)
+            if books is None:
+                return {"error": "unknown rival"}
+            return books
 
         if name == "call_report":
             idx = int(args.get("idx", ["-1"])[0])
@@ -510,10 +540,12 @@ class Handler(BaseHTTPRequestHandler):
                 with GAME.lock:
                     if GAME.state is None:
                         return self._json({"error": "no game"}, 400)
-                    res = engine.advance(GAME.state, unit)
+                    skip = bool(body.get("skip_inbox"))
+                    res = engine.advance(GAME.state, unit, skip_inbox=skip)
                     GAME.store.snapshot(GAME.state)
                 return self._json({"ok": True, "result":
                                    {"days": res["days"], "date": res["date"],
+                                    "inbox": bool(res.get("inbox")),
                                     "events": [{"id": e["id"], "title": e["title"],
                                                 "blocking": e.get("blocking", False)}
                                                for e in res["events"]]}})
@@ -566,6 +598,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", MIME.get(ext, "application/octet-stream"))
         self.send_header("Content-Length", str(len(body)))
+        if ext in (".js", ".css", ".html"):
+            self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
 

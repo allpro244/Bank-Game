@@ -22,7 +22,8 @@ CREATE TABLE IF NOT EXISTS saves (
     name TEXT PRIMARY KEY,
     seed INTEGER NOT NULL,
     created REAL NOT NULL,
-    last_played REAL NOT NULL
+    last_played REAL NOT NULL,
+    summary TEXT
 );
 CREATE TABLE IF NOT EXISTS snapshots (
     save_name TEXT NOT NULL,
@@ -41,30 +42,55 @@ class Store:
         self.path = path or os.environ.get("BANKGAME_DB", DB_FILE)
         self.conn = sqlite3.connect(self.path, check_same_thread=False)
         self.conn.executescript(SCHEMA)
+        self._migrate()
         self.conn.commit()
+
+    def _migrate(self):
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(saves)")}
+        if "summary" not in cols:
+            self.conn.execute("ALTER TABLE saves ADD COLUMN summary TEXT")
 
     # ---- saves ----
     def list_saves(self):
         cur = self.conn.execute(
-            "SELECT s.name, s.seed, s.created, s.last_played, "
+            "SELECT s.name, s.seed, s.created, s.last_played, s.summary, "
             " (SELECT MAX(day_index) FROM snapshots WHERE save_name=s.name), "
             " (SELECT date FROM snapshots WHERE save_name=s.name "
             "  ORDER BY day_index DESC LIMIT 1) "
             "FROM saves s ORDER BY s.last_played DESC")
         out = []
-        for name, seed, created, played, day, date in cur.fetchall():
+        for name, seed, created, played, summary, day, date in cur.fetchall():
             card = {"name": name, "seed": seed, "created": created,
                     "last_played": played, "day_index": day or 0,
                     "date": date or ""}
-            st = self.load(name)
-            if st:
+            cached = None
+            if summary:
                 try:
-                    from .sim.goals import summarize_save
-                    card.update(summarize_save(st))
+                    cached = json.loads(summary)
                 except Exception:
-                    pass
+                    cached = None
+            if cached:
+                card.update(cached)
+            else:
+                st = self.load(name)
+                if st:
+                    try:
+                        from .sim.goals import summarize_save
+                        extra = summarize_save(st)
+                        card.update(extra)
+                        self._write_summary(name, extra)
+                    except Exception:
+                        pass
             out.append(card)
         return out
+
+    def _write_summary(self, name, extra):
+        try:
+            self.conn.execute("UPDATE saves SET summary=? WHERE name=?",
+                              (json.dumps(extra, separators=(",", ":")), name))
+            self.conn.commit()
+        except Exception:
+            pass
 
     def create_save(self, name, seed):
         now = time.time()
@@ -92,6 +118,13 @@ class Store:
             (name, day, date, qend, time.time(), blob))
         self.conn.execute("UPDATE saves SET last_played=? WHERE name=?",
                           (time.time(), name))
+        try:
+            from .sim.goals import summarize_save
+            extra = summarize_save(state)
+            self.conn.execute("UPDATE saves SET summary=? WHERE name=?",
+                              (json.dumps(extra, separators=(",", ":")), name))
+        except Exception:
+            pass
         self._prune(name)
         self.conn.commit()
 

@@ -225,9 +225,17 @@ def sell(state, lot_id, par_amount=None):
             lines.append(["5180", -gl, 0])
         L.post(bank["ledger"], date, "SOLD HTM %s ($%s par) — HTM BOOK TAINTED"
                % (lot["type"].upper(), f"{sell_par // 100:,}"), lines, tag="sec")
+        # Shrink/remove THIS lot before taint, or _taint_htm posts 1210 again.
+        lot["par"] -= sell_par
+        lot["book"] -= sell_book
+        lot["mv"] -= sell_mv
+        if lot["par"] <= 0:
+            book["lots"].remove(lot)
         if not book["htm_tainted"]:
             book["htm_tainted"] = True
             events.append(_taint_htm(state))
+        revalue(state)
+        return {"proceeds": sell_mv, "gain_loss": gl, "events": events}
     lot["par"] -= sell_par
     lot["book"] -= sell_book
     lot["mv"] -= sell_mv

@@ -365,7 +365,9 @@ def originate_month(state, rng):
         funding_mult *= 0.35
     if bank["funding"].get("shrink_originations"):
         funding_mult *= 0.25
-        bank["funding"]["shrink_originations"] = False
+        # Keep the throttle on until spendable cash is actually back.
+        if cash >= max(250_000_00, int(total_before * 0.01)):
+            bank["funding"]["shrink_originations"] = False
 
     for market_id in sorted(bank["deposits"]["pools"].keys()):
         region = state["regions"][market_id]
@@ -807,7 +809,7 @@ def step_month_credit(state, rng):
                [["1000", rec_total, 0], ["1350", 0, rec_total]], tag="credit")
 
     _step_oreo(state, rng)
-    _prune_pools(cfg)
+    _prune_pools(state, cfg)
     return events
 
 
@@ -926,8 +928,19 @@ def _step_oreo(state, rng):
         cfg["oreo"].remove(o)
 
 
-def _prune_pools(cfg):
-    cfg["pools"] = [p for p in cfg["pools"] if p["balance"] > 100]
+def _prune_pools(state, cfg):
+    keep = []
+    crumb = 0
+    for p in cfg["pools"]:
+        if p["balance"] > 100:
+            keep.append(p)
+        elif p["balance"] > 0:
+            crumb += p["balance"]
+    if crumb > 0:
+        L.post(state["bank"]["ledger"], state["time"]["date"],
+               "Loan pool crumbs settled to cash",
+               [["1000", crumb, 0], ["1300", 0, crumb]], tag="credit")
+    cfg["pools"] = keep
     # merge very old vintages into a "seasoned" pool per product/market/tier
     if len(cfg["pools"]) > 2500:
         cfg["pools"].sort(key=lambda p: p["vint"])

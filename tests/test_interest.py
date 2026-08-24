@@ -85,6 +85,9 @@ class TestInterest(unittest.TestCase):
         self.assertTrue(book["htm_tainted"])
         self.assertFalse(any(l["cls"] == "HTM" for l in book["lots"]))
         self.assertEqual(L.trial_balance(state["bank"]["ledger"]), 0)
+        htm_book = sum(l["book"] for l in book["lots"] if l["cls"] == "HTM")
+        self.assertEqual(state["bank"]["ledger"]["balances"]["1210"], htm_book)
+        self.assertGreaterEqual(state["bank"]["ledger"]["balances"]["1210"], 0)
 
     def test_yield_curve_interpolation(self):
         econ = self.state["economy"]

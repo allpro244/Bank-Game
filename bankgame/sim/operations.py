@@ -128,6 +128,8 @@ def open_branch(state, market_id, quality=2):
     from .funding import ensure_cash
     if ensure_cash(state, cost) < cost:
         return "not enough cash ($%s needed)" % f"{cost // 100:,}"
+    if any(b.get("market") == market_id and b.get("open") for b in ops["branches"]):
+        return "already have a branch in this market"
     if state["regulation"].get("growth_cap_active") and len(ops["branches"]) > 2:
         return "growth restrictions under your enforcement action block new branches"
     b = {"id": ops["next_branch_id"], "market": market_id, "open": True,
@@ -145,18 +147,35 @@ def open_branch(state, market_id, quality=2):
     return b
 
 
+def digital_upgrade_cost(level):
+    return int(1_500_000_00 * (1 + level) ** 1.6)
+
+
+def core_upgrade_cost(assets):
+    return int(max(assets, 20_000_000_00) * 0.004) + 500_000_00
+
+
 def close_branch(state, branch_id):
     bank = state["bank"]
     ops = bank["ops"]
+    open_n = sum(1 for x in ops["branches"] if x.get("open"))
     for b in ops["branches"]:
         if b["id"] == branch_id and b["open"]:
-            b["open"] = False
+            if open_n <= 1:
+                return "cannot close your last branch"
+            residual = BRANCH_CLOSE_COST - min(BRANCH_CLOSE_COST,
+                                              bank["ledger"]["balances"]["1500"])
+            from .funding import ensure_cash
+            if residual > 0 and ensure_cash(state, residual) < residual:
+                return "not enough cash to close this branch ($%s)" % \
+                    f"{residual // 100:,}"
             writeoff = min(BRANCH_CLOSE_COST, bank["ledger"]["balances"]["1500"])
             L.post(bank["ledger"], state["time"]["date"],
                    "Branch closed (%s)" % b["market"],
                    [["5170", BRANCH_CLOSE_COST, 0],
                     ["1500", 0, writeoff],
                     ["1000", 0, BRANCH_CLOSE_COST - writeoff]], tag="ops")
+            b["open"] = False
             ops["branches"].remove(b)
             return {}
     return "branch not found"
@@ -215,7 +234,7 @@ def invest_digital(state):
     ops = bank["ops"]
     if ops["digital_level"] >= 5:
         return "digital platform already best-in-class"
-    cost = int(1_500_000_00 * (1 + ops["digital_level"]) ** 1.6)
+    cost = digital_upgrade_cost(ops["digital_level"])
     from .funding import ensure_cash
     if ensure_cash(state, cost) < cost:
         return "not enough cash ($%s needed)" % f"{cost // 100:,}"
@@ -230,7 +249,7 @@ def upgrade_core(state):
     bank = state["bank"]
     ops = bank["ops"]
     assets = max(bank["cached_assets"], 20_000_000_00)
-    cost = int(assets * 0.004) + 500_000_00
+    cost = core_upgrade_cost(assets)
     from .funding import ensure_cash
     if ensure_cash(state, cost) < cost:
         return "not enough cash ($%s needed)" % f"{cost // 100:,}"
