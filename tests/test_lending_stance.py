@@ -142,5 +142,67 @@ class TestLoanTape(unittest.TestCase):
         self.assertIn("Culpepper Cattle Co.", names)
 
 
+class TestMonthBook(unittest.TestCase):
+    def _close_january(self, state):
+        state["bank"]["funding"]["overnight_policy"] = "auto"
+        while state["time"]["date"] < "2000-02-02":
+            engine.step_day(state)
+            state["events"]["pending"].clear()
+
+    def test_opening_book_is_not_january_originations(self):
+        state = new_game("OpenBk", seed=1)
+        opening_ids = {n["id"] for n in state["bank"]["loans"]["notes"]}
+        state["bank"]["loans"]["queue"].clear()
+        self._close_january(state)
+        recap = state["bank"]["loans"]["last_month_book"]
+        self.assertIsNotNone(recap)
+        new_ids = {e["id"] for e in recap["new"] if e.get("id") is not None}
+        self.assertTrue(recap["new_count"] >= 1)
+        self.assertFalse(opening_ids & new_ids)
+
+    def test_culpepper_is_named_on_the_month_recap(self):
+        state = new_game("CulBk", seed=1)
+        app = state["bank"]["loans"]["queue"][0]
+        engine.perform_action(state, "approve_loan", {"app_id": app["id"]})
+        self._close_january(state)
+        recap = state["bank"]["loans"]["last_month_book"]
+        names = [e["name"] for e in recap["new"]]
+        self.assertIn("Culpepper Cattle Co.", names)
+        self.assertTrue(any(e.get("kind") == "large" for e in recap["new"]
+                            if e["name"] == "Culpepper Cattle Co."))
+
+    def test_decline_shows_up_as_what_did_not_book(self):
+        state = new_game("NoBk", seed=1)
+        app = state["bank"]["loans"]["queue"][0]
+        engine.perform_action(state, "decline_loan", {"app_id": app["id"]})
+        self._close_january(state)
+        recap = state["bank"]["loans"]["last_month_book"]
+        declined = [e["name"] for e in recap["declined"]]
+        self.assertIn("Culpepper Cattle Co.", declined)
+        self.assertNotIn("Culpepper Cattle Co.", [e["name"] for e in recap["new"]])
+
+    def test_recap_is_logged_not_blocking(self):
+        state = new_game("LogBk", seed=2)
+        state["bank"]["loans"]["queue"].clear()
+        self._close_january(state)
+        evs = [e for e in state["events"]["log"] if e.get("type") == "lending_month"]
+        self.assertEqual(len(evs), 1)
+        self.assertFalse(evs[0].get("blocking"))
+        self.assertNotIn(evs[0]["id"],
+                         [e["id"] for e in state["events"]["pending"]])
+        self.assertIn("Booked", evs[0]["text"])
+
+    def test_digest_names_the_book(self):
+        state = new_game("DigBk", seed=1)
+        state["bank"]["loans"]["queue"].clear()
+        self._close_january(state)
+        d = state["digests"][-1]
+        self.assertTrue(d.get("lending"))
+        self.assertIn("Booked", d["lending"])
+        self.assertTrue(d.get("lending_book"))
+        self.assertGreater(d["lending_book"]["new_count"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()
+

@@ -246,10 +246,17 @@ def _process_month_boundary(state, prev_date):
     for ev in deposits.step_month(state, _rng(state, "deposit")):
         raised.append(push_event(state, ev))
     loans.collect_monthly_interest(state)
+    loans.snapshot_book(state)
     for ev in loans.step_month_credit(state, _rng(state, "credit")):
         raised.append(push_event(state, ev))
     for ev in loans.originate_month(state, _rng(state, "credit")):
         raised.append(push_event(state, ev))
+    recap = loans.close_month_book(state, month_label)
+    if recap:
+        raised.append(push_event(state, {
+            "type": "lending_month", "blocking": False,
+            "title": "Lending book — %s" % month_label,
+            "text": recap["text"]}))
     securities.step_month(state, _rng(state, "misc"))
     for ev in funding.step_month(state, _rng(state, "misc")):
         raised.append(push_event(state, ev))

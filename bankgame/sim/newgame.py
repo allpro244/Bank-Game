@@ -138,7 +138,7 @@ def _seed_balance_sheet(state):
     for prod, tier, amt in loan_seed:
         rate = loans.offer_rate(state, prod, tier, "caprock")
         loans.book_flow(state, prod, _home(state), tier, "1997",
-                        amt, rate, 1.0, age_m=30)
+                        amt, rate, 1.0, age_m=30, journal=False)
         total_loans += amt
 
     # ---- securities: $4.0M ----
