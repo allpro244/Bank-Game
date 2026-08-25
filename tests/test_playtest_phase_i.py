@@ -405,5 +405,84 @@ class TestPlaytestLeftovers(unittest.TestCase):
         self.assertNotIn("capital_repair", [c["id"] for c in advisor.cards(state)])
 
 
+class TestQuarterClock(unittest.TestCase):
+    """Play until is a clock. Quarter close is a log line unless the
+    player asks the clock to stop there."""
+
+    def _ready_for_quarter(self, name, seed, stop=False):
+        state = new_game(name, seed=seed)
+        state["bank"]["loans"]["queue"].clear()
+        state["events"]["pending"].clear()
+        state["bank"]["funding"]["overnight_policy"] = "auto"
+        state["bank"]["policies"]["stop_on_quarter"] = stop
+        state["time"]["date"] = "2000-03-31"
+        return state
+
+    def test_quarter_close_is_logged_not_blocking_by_default(self):
+        state = self._ready_for_quarter("QClk", 1)
+        evs = engine.step_day(state)
+        qcs = [e for e in evs if e["type"] == "quarter_close"]
+        self.assertEqual(len(qcs), 1)
+        self.assertFalse(qcs[0].get("blocking"))
+        self.assertFalse(any(e["type"] == "quarter_close"
+                             for e in state["events"]["pending"]))
+        self.assertTrue(any(e["type"] == "quarter_close"
+                            for e in state["events"]["log"]))
+
+    def test_old_save_without_the_flag_does_not_stop(self):
+        state = self._ready_for_quarter("QOld", 1)
+        del state["bank"]["policies"]["stop_on_quarter"]
+        evs = engine.step_day(state)
+        qcs = [e for e in evs if e["type"] == "quarter_close"]
+        self.assertEqual(len(qcs), 1)
+        self.assertFalse(qcs[0].get("blocking"))
+
+    def test_stop_on_quarter_makes_close_blocking(self):
+        state = self._ready_for_quarter("QStop", 1, stop=True)
+        evs = engine.step_day(state)
+        qcs = [e for e in evs if e["type"] == "quarter_close"]
+        self.assertEqual(len(qcs), 1)
+        self.assertTrue(qcs[0].get("blocking"))
+        self.assertTrue(any(e["type"] == "quarter_close"
+                            for e in state["events"]["pending"]))
+
+    def test_set_policy_toggles_the_flag(self):
+        state = new_game("QPol", seed=1)
+        self.assertFalse(state["bank"]["policies"]["stop_on_quarter"])
+        engine.set_policy(state, "policies.stop_on_quarter", True)
+        self.assertTrue(state["bank"]["policies"]["stop_on_quarter"])
+        engine.set_policy(state, "policies.stop_on_quarter", False)
+        self.assertFalse(state["bank"]["policies"]["stop_on_quarter"])
+
+    def test_play_until_does_not_stop_because_of_quarter_close(self):
+        state = self._ready_for_quarter("QPlay", 7)
+        res = engine.advance(state, "until", max_days=5)
+        self.assertFalse(any(e["type"] == "quarter_close"
+                             for e in state["events"]["pending"]))
+        self.assertTrue(any(e["type"] == "quarter_close"
+                            for e in state["events"]["log"]))
+        leftover = [e for e in state["events"]["pending"]
+                    if e["type"] == "quarter_close"]
+        self.assertEqual(leftover, [])
+        if res["days"] < 5:
+            self.assertNotEqual(res.get("stopped"), None)
+            self.assertTrue(any(e.get("blocking") and e["type"] != "quarter_close"
+                                for e in state["events"]["pending"]))
+
+    def test_play_until_stops_on_quarter_when_opted_in(self):
+        state = self._ready_for_quarter("QOpt", 7, stop=True)
+        res = engine.advance(state, "until", max_days=5)
+        self.assertGreaterEqual(res["days"], 1)
+        self.assertEqual(res["stopped"], "blocking")
+        self.assertTrue(any(e["type"] == "quarter_close" and e.get("blocking")
+                            for e in state["events"]["pending"]))
+        state["events"]["pending"] = [
+            e for e in state["events"]["pending"] if e["type"] == "quarter_close"]
+        self.assertEqual(engine.interrupt_reason(state), "blocking")
+        stuck = engine.advance(state, "until", max_days=5)
+        self.assertEqual(stuck["days"], 0)
+        self.assertEqual(stuck["stopped"], "blocking")
+
+
 if __name__ == "__main__":
     unittest.main()

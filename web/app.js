@@ -332,7 +332,7 @@ function renderNav() {
      <div class="tab" onclick="showGlossary()"><span>📖 Glossary</span></div>
      <div class="tab" onclick="toggleMode()" title="Owner view: plain language. Banker view: full jargon. Same game.">
        <span>⇄ ${MODE === 'owner' ? 'Owner view' : 'Banker view'}</span></div>
-     <div class="helptip" style="padding:8px 14px;line-height:1.35">Keys: space day · w week · m month · q quarter · u play until. Week/month/quarter stop if Your Desk has a decision. Play until uses your credit box.</div>`;
+     <div class="helptip" style="padding:8px 14px;line-height:1.35">Keys: space day · w week · m month · q quarter · u play until. Week/month/quarter stop if Your Desk has a decision. Play until uses your credit box and does not stop on quarter close unless you opt in.</div>`;
 }
 
 async function switchTab(id) {
@@ -444,7 +444,13 @@ async function tabDesk(m) {
 
     <div class="panel tight" style="margin:10px 0">
       <button class="primary" onclick="advance('until')">Play until something needs you</button>
-      <span class="sub"> — runs the clock. Your credit box (Lending) handles matching memos. Stops on exams, runs, fraud, overnight holes, and anything outside the box.</span>
+      <label class="sub" style="margin-left:12px;white-space:nowrap">
+        <input type="checkbox" ${d.stop_on_quarter ? 'checked' : ''}
+          style="width:auto;margin-right:4px"
+          onchange="setPol('policies.stop_on_quarter', this.checked)">
+        Stop every quarter
+      </label>
+      <span class="sub"> — runs the clock. Your credit box (Lending) handles matching memos. Stops on exams, runs, fraud, overnight holes, and anything outside the box. Quarter close goes to the log unless you opt in.</span>
     </div>
     <h3>Inbox — decisions waiting on you</h3>
     <div class="panel">

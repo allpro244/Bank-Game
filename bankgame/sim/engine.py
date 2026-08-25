@@ -299,8 +299,9 @@ def _process_month_boundary(state, prev_date):
         if len(state["call_reports"]) > 120:
             del state["call_reports"][0]
         mt = state["metrics"][-1] if state["metrics"] else {}
+        stop_q = bool(bank.get("policies", {}).get("stop_on_quarter"))
         raised.append(push_event(state, {
-            "type": "quarter_close", "blocking": True,
+            "type": "quarter_close", "blocking": stop_q,
             "ni": bank["last_quarter_net_income"],
             "cet1": mt.get("cet1_ratio"),
             "ldr": mt.get("loan_to_deposit"),
@@ -966,7 +967,8 @@ def advance(state, unit="day", skip_inbox=False, max_days=None):
 
     `until` is Play until: run day-by-day until an interrupt (or max_days).
     The credit box (if enabled) handles matching memos so they do not stop
-    the clock. Advisor never writes the box.
+    the clock. Quarter close is a log line unless policies.stop_on_quarter.
+    Advisor never writes the box.
     """
     if unit == "until":
         n = int(max_days or 1260)
@@ -1466,6 +1468,7 @@ POLICY_SPECS = [
     ("fraud.threshold", None, int, 0, 4),
     ("regulation.bsa.program_spend", None, int, 0, 100_000_000_00),
     ("policies.dividend_payout", None, int, 0, 100),
+    ("policies.stop_on_quarter", None, (True, False), None, None),
     ("funding.overnight_policy", None, ("ask", "auto"), None, None),
 ]
 

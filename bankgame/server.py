@@ -441,6 +441,8 @@ class Game:
                 "pipeline": s.get("ma_pipeline") or [],
                 "peer_avg": ADV.peer_averages(s),
                 "goal": GOALS.progress(s),
+                "stop_on_quarter": bool(
+                    bank.get("policies", {}).get("stop_on_quarter")),
             }
 
         if name == "events":
