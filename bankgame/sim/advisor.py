@@ -142,7 +142,8 @@ def gauges(state):
         "key": "regulators", "label": "Regulators", "status": st, "head": head,
         "tab": "risk",
         "detail": ("Your exam report card (CAMELS) is a %d on a 1-5 scale — 1-2 is "
-                   "good, 4-5 means forced restrictions. Next exam in about %d "
+                   "good, a 3 is an MOU (you can still grow), 4-5 is a consent "
+                   "order that freezes growth. Next exam in about %d "
                    "months.%s") % (camels, max(0, reg["months_to_exam"]),
                                    (" Active actions: " + "; ".join(reg["orders"]) + ".")
                                    if reg["orders"] else "")})
@@ -587,15 +588,17 @@ def _r_hoarding(state):
     if roe is None:
         return None
     if ea < 0.16 or payout > 40 or reg["pca"] != "well" or \
-            reg["camels"]["composite"] > 2 or roe > 0.10:
+            reg["camels"]["composite"] > 3 or roe > 0.10:
         return None
+    sev = 1 if ea >= 0.25 else 0
     return _card(
-        "hoarding", 0, "You're sitting on a pile of idle capital",
+        "hoarding", sev, "You're sitting on a pile of idle capital",
         "Equity is %.0f%% of assets — roughly double what a safe bank needs — "
         "and your return on equity is only %.1f%%. Idle capital makes owners "
-        "poor. Either put it to work (grow: branches, lenders, acquisitions) "
-        "or give it back (raise the dividend payout toward 50%%, or buy back "
-        "stock on the Treasury tab)." % (ea * 100, m.get("roe", 0) * 100),
+        "poor. An MOU does not stop you from growing. Either put it to work "
+        "(branches, lenders, acquisitions) or give it back (raise the "
+        "dividend payout toward 50%%, or buy back stock on the Treasury tab)."
+        % (ea * 100, m.get("roe", 0) * 100),
         "ROA measures the bank; ROE measures the owner. A fortress balance "
         "sheet with no plan is a savings account with overhead.",
         "treasury",
@@ -695,9 +698,21 @@ def _r_exam_prep(state):
 
 def _r_camels_repair(state):
     cam = state["regulation"]["camels"]["composite"]
-    if cam < 4:
+    if cam < 3:
         return None
     adv = REG.exam_recovery_advice(state)
+    if cam == 3:
+        return _card(
+            "camels_repair", 1,
+            "A 3 is an MOU — you can still grow",
+            "Examiners are watching, not freezing you. Open the next county, "
+            "hire, bid. A consent order (a 4) is what stops growth and M&A. "
+            "The world crown is won by people who keep expanding on a 3. "
+            + adv["needed"],
+            "An MOU is a letter. A consent order is a lock. The engine only "
+            "hard-blocks at composite 4.",
+            "risk",
+            [_goto("Open Risk & Reg", "risk")])
     body = adv["needed"] + " " + " ".join(adv["actions"][:3])
     return _card(
         "camels_repair", 2, "Your report card is a %d — here is the way out" % cam,

@@ -20,9 +20,11 @@ parked until this pass makes the stated game playable.
 `DESIGN.md` is still the model reference. `ROADMAP.md` stays the index.
 This file is what we build next, in what order, and what “done” means.
 
-**Status (this PR):** I1–I7 are implemented in engine + UI. The $250B
-crown is **not** moved. The 60-year measurement pack is still the next
-gate before anyone touches the default goal.
+**Status:** I1–I7 shipped in PR #9. The crown is winnable (`PLAYTEST_WORLD_CROWN`
+on Claude’s report: $253B / y86). I8 is the leftover: a CAMELS 3 writes
+an MOU that grades Management and sustains the 3 — that is the 65-year
+flatline, the year-one 4, and the “cautious play silently costs the game”
+signpost. The $250B number still does not move.
 
 ---
 

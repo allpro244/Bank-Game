@@ -804,8 +804,8 @@ def interrupt_reason(state):
         return "fraud"
     if state["regulation"]["pca"] not in ("well", "adequate"):
         return "pca"
-    if state["regulation"]["camels"]["composite"] >= 4:
-        return "camels"
+    # A 4-rated exam already arrives as a blocking event. Holding the
+    # clock forever on the rating made the next exam unreachable.
     return None
 
 

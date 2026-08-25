@@ -34,6 +34,7 @@ def new_regulation():
                 "sars_filed": 0, "ctrs_filed": 0, "fined": False},
         "cra": "Satisfactory",
         "exam_reports": [],
+        "idle_letter_month": 0,
         "fdic_special": 0.0,
         "seized": False,
         "stress_test_buffer": 0.0,
@@ -244,7 +245,8 @@ def monthly_update(state, rng):
     # BSA/AML: program adequacy vs bank size and activity. In a small bank
     # ops staff double as the BSA function; big banks need dedicated FTEs.
     assets = max(1, bank.get("cached_assets") or 0)
-    need = max(0.5, (assets / 100 / 1_000_000_000) * 2.5)   # compliance FTE need per $B
+    assets_b = assets / 100 / 1_000_000_000
+    need = max(0.5, min(20.0, 0.55 + (max(0.0, assets_b) ** 0.55) * 1.15))
     have = bank["ops"]["staff"]["compliance"]["count"] \
         + 0.35 * bank["ops"]["staff"]["ops"]["count"]
     spend_ok = reg["bsa"]["program_spend"] >= assets * 0.000004
@@ -280,7 +282,54 @@ def monthly_update(state, rng):
     reg["months_to_exam"] -= 1
     if reg["months_to_exam"] <= 0:
         events.extend(run_exam(state, rng))
+
+    ev = _idle_capital_letter(state)
+    if ev:
+        events.append(ev)
     return events
+
+
+def _idle_capital_letter(state):
+    """Board / activist pulse when the owner is hoarding. At most every 18 months."""
+    m = state["metrics"][-1] if state.get("metrics") else None
+    if not m or not m.get("earnings_ready"):
+        return None
+    ea = m["equity"] / max(1, m["assets"])
+    roe = m.get("roe")
+    if roe is None or ea < 0.22 or roe > 0.08:
+        return None
+    if state["regulation"]["pca"] != "well":
+        return None
+    last = int(state["regulation"].get("idle_letter_month") or -99)
+    mo = state["economy"]["months"]
+    if mo - last < 18:
+        return None
+    state["regulation"]["idle_letter_month"] = mo
+    payout = state["bank"]["policies"]["dividend_payout"]
+    return {
+        "type": "idle_capital", "blocking": True,
+        "title": "The board wants the idle capital put to work",
+        "text": ("Equity is %.0f%% of assets and trailing ROE is %.1f%%. "
+                 "A fortress that does not grow or pay out is a savings "
+                 "account with overhead. Dividend payout is %d%%. Raise it "
+                 "toward 50%%, buy back stock, or put the money into offices "
+                 "and loans. Sitting on it is how you lose the world race "
+                 "without ever failing an exam."
+                 % (ea * 100, roe * 100, payout)),
+    }
+
+
+# Orders this exam *writes* because of the composite. They must not
+# grade Management next time — that is a self-sustaining trap.
+SELF_ORDERS = (
+    "Memorandum of understanding",
+    "Consent order (safety & soundness)",
+)
+
+
+def independent_orders(reg):
+    """Enforcement the player earned (BSA, etc.) — not the exam's own MOU/consent."""
+    return [o for o in (reg.get("orders") or []) if o not in SELF_ORDERS]
 
 
 def run_exam(state, rng):
@@ -308,8 +357,13 @@ def run_exam(state, rng):
     if cre_conc > 3.0:
         A = min(5, A + 1)
 
-    roa = bank.get("roa_ttm", 0.01)
-    E = 1 if roa > 0.013 else 2 if roa > 0.009 else 3 if roa > 0.004 else 4 if roa > 0 else 5
+    mrow = state["metrics"][-1] if state.get("metrics") else {}
+    if not mrow.get("earnings_ready"):
+        # Do not invent a year rate from three quiet months (G2 / law 7).
+        E = 2
+    else:
+        roa = bank.get("roa_ttm", 0.01)
+        E = 1 if roa > 0.013 else 2 if roa > 0.009 else 3 if roa > 0.004 else 4 if roa > 0 else 5
 
     lr, _ = liquidity_ratio(state)
     wd = wholesale_dependence(state)
@@ -338,7 +392,10 @@ def run_exam(state, rng):
     S = 1 if rate_risk < 0.05 else 2 if rate_risk < 0.15 else \
         3 if rate_risk < 0.30 else 4 if rate_risk < 0.5 else 5
 
-    comp_need = max(0.5, (assets / 100 / 1_000_000_000) * 2.5)
+    # Compliance FTE need grows slower than assets. 2.5 per $1B made a
+    # $50B bank "undermanaged" unless it hired a money-center BSA army.
+    assets_b = assets / 100 / 1_000_000_000
+    comp_need = max(0.5, min(20.0, 0.55 + (max(0.0, assets_b) ** 0.55) * 1.15))
     comp_have = bank["ops"]["staff"]["compliance"]["count"] \
         + 0.35 * bank["ops"]["staff"]["ops"]["count"]
     M = 2
@@ -348,7 +405,9 @@ def run_exam(state, rng):
         M += 0   # acceptable with analysts
         if bank["ops"]["staff"]["credit_analysts"]["count"] < 1:
             M += 1
-    if len(reg["orders"]) > 0:
+    # Only independently earned orders grade M. The MOU/consent this
+    # exam writes must not force the next composite.
+    if independent_orders(reg):
         M += 1
     if bank["ops"]["audit_spend"] < assets * 0.0000015:
         M += 1
@@ -402,11 +461,21 @@ def run_exam(state, rng):
         del reg["exam_reports"][0]
     tone = {1: "they are delighted", 2: "they are calm", 3: "they are watching",
             4: "they are not happy", 5: "they are taking the keys"}[composite]
+    if composite == 3:
+        title = "EXAMINATION COMPLETE — Composite 3 (MOU: you can still grow)"
+        owner_title = "Report card: 3 — they are watching. An MOU is not a freeze."
+    elif composite >= 4:
+        title = "EXAMINATION COMPLETE — Composite %d (CONSENT ORDER: growth capped)" % composite
+        owner_title = "Report card: %d — %s. Growth is frozen until this moves." % (
+            composite, tone)
+    else:
+        title = "EXAMINATION COMPLETE — Composite rating: %d" % composite
+        owner_title = "Report card: %d — %s" % (composite, tone)
     events.append({"type": "exam", "blocking": True,
                    "composite": composite,
                    "components": dict(comps),
-                   "title": "EXAMINATION COMPLETE — Composite rating: %d" % composite,
-                   "owner_title": "Report card: %d — %s" % (composite, tone),
+                   "title": title,
+                   "owner_title": owner_title,
                    "owner_summary": (
                        "Capital %d · loans %d · management %d · earnings %d · "
                        "cash %d · rate risk %d."
@@ -447,8 +516,9 @@ def _write_report(state, comps, composite, r, npa_ratio, lr, wd, rate_risk, cre_
         lines.append("The institution is fundamentally sound. Continue present policies.")
     elif composite == 3:
         lines.append("Weaknesses warrant supervisory attention. A memorandum of understanding "
-                     "has been executed with the board. Address criticized items before the "
-                     "next examination.")
+                     "has been executed with the board. An MOU is not a consent order: "
+                     "you may still open offices, hire, and bid. A 4 freezes growth. "
+                     "Address criticized items before the next examination.")
     else:
         lines.append("The institution's condition is unsafe and unsound. A consent order is in "
                      "effect: capital distributions are PROHIBITED and asset growth is "
@@ -466,7 +536,8 @@ COMP_OWNER = {
 _RECOVERY = {
     "C": "Raise common (or shrink assets) until CET1 is back above 10%.",
     "A": "Work the criticized book and stop writing loose CRE / construction.",
-    "M": "Staff compliance, fund the BSA program, and clear the order.",
+    "M": "Staff compliance and fund BSA. An MOU written by this exam does not "
+         "grade Management — only a BSA order or a real control failure does.",
     "E": "A quiet year of ~1% ROA. Hiring that loses money will not help.",
     "L": "Stop the window, pay down wholesale, and get LDR under 1.05.",
     "S": "Shorten the bond book or hedge. Unrealized losses vs CET1 are the tell.",
