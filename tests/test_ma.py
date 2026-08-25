@@ -23,6 +23,24 @@ class TestMA(unittest.TestCase):
         self.assertTrue(any(state["regions"][m]["kind"] in ("rural", "small_metro")
                             for m in mkts))
 
+    def test_fdic_whale_is_refused(self):
+        state = new_game("Whale", seed=4)
+        snap = copy.deepcopy(state["bank"]["ledger"])
+        ev = {
+            "franchise": {
+                "deposits": 20_000_000_000_00, "loans": 16_000_000_000_00,
+                "credit_mark": 0.08, "branches": 40, "markets": ["nyc"],
+                "rival_bid_bp": 10,
+            },
+            "bank_name": "Empire Clearing Bank",
+        }
+        pf = engine.fdic_proforma(state, ev["franchise"], 80)
+        self.assertFalse(pf["can_bid"])
+        res = engine._resolve_fdic_bid(state, ev, 80)
+        self.assertIsInstance(res, str)
+        self.assertIn("franchise", res.lower())
+        self.assertEqual(state["bank"]["ledger"]["balances"], snap["balances"])
+
     def test_denied_deal_leaves_ledger_untouched(self):
         state = new_game("Deny", seed=4)
         snap = copy.deepcopy(state["bank"]["ledger"])

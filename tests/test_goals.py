@@ -77,6 +77,15 @@ class TestGoals(unittest.TestCase):
         self.assertEqual(ev["type"], "goal_won")
         self.assertTrue(state["meta"]["goal_won"])
 
+    def test_world_goal_bar_is_not_halfway_on_charter_day(self):
+        state = new_game("WorldBar", seed=8, goal="world")
+        p = GOALS.progress(state)
+        race = GOALS.world_race(state)
+        self.assertLess(race["me"], race["rival_assets"] / 100)
+        # $20M vs Empire (~$26B) and $250B is a rounding error, not 28%.
+        self.assertLess(p["pct"], 0.03)
+        self.assertIn("Empire", p["text"])
+
     def test_world_goal_tracks_rank_and_can_win(self):
         state = new_game("World", seed=8, goal="world")
         p = GOALS.progress(state)
