@@ -794,8 +794,6 @@ def interrupt_reason(state):
     loans.apply_credit_box(state)
     if state["regulation"].get("seized"):
         return "seized"
-    if state["crisis"].get("run_active"):
-        return "run"
     if any(e.get("blocking") for e in state["events"]["pending"]):
         return "blocking"
     if state["bank"]["loans"]["queue"]:
@@ -804,8 +802,9 @@ def interrupt_reason(state):
         return "fraud"
     if state["regulation"]["pca"] not in ("well", "adequate"):
         return "pca"
-    if state["regulation"]["camels"]["composite"] >= 4:
-        return "camels"
+    # Exam, run_start, and PCA already arrive as blocking events. Holding
+    # the clock on the leftover rating / run flag made the next exam or
+    # the run's end unreachable.
     return None
 
 

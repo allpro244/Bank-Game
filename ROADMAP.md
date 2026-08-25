@@ -626,6 +626,7 @@ the crown or the default goal.
 | I3 | Opex band, lender earns their keep, trade-area metros, 2nd office, LDR, digital preview, year-one sit-still |
 | I1 | Play until + player-written credit box (clock, not advisor autopilot) |
 | I7 | Advisor cards carry the same NI preview as the button |
+| I8 | CAMELS 3 must not write an MOU that grades M and sustains the 3 |
 
 Ship order and tests are in `PLAYTEST_PLAN.md`. The $250B number
 does not move until I2+I3 are measured.

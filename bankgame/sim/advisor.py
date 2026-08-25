@@ -18,6 +18,7 @@ from . import securities as SEC
 from . import funding as FUND
 
 DISMISS_MONTHS = 6      # a dismissed card stays quiet this long
+RAISE_COOLDOWN_MONTHS = 3   # one sitting must not raise twenty times
 TUTORIAL_MAX_MONTHS = 18
 
 
@@ -142,7 +143,8 @@ def gauges(state):
         "key": "regulators", "label": "Regulators", "status": st, "head": head,
         "tab": "risk",
         "detail": ("Your exam report card (CAMELS) is a %d on a 1-5 scale — 1-2 is "
-                   "good, 4-5 means forced restrictions. Next exam in about %d "
+                   "good, a 3 is an MOU (you can still grow), 4-5 is a consent "
+                   "order that freezes growth. Next exam in about %d "
                    "months.%s") % (camels, max(0, reg["months_to_exam"]),
                                    (" Active actions: " + "; ".join(reg["orders"]) + ".")
                                    if reg["orders"] else "")})
@@ -221,7 +223,11 @@ def cards(state):
         if card is None:
             continue
         when = adv["dismissed"].get(card["id"])
-        if when is not None and months - when < DISMISS_MONTHS and card["sev"] < 2:
+        # Sev 2 usually stays sticky. capital_repair is the exception:
+        # dismiss and a just-completed raise both have to stick, or one
+        # sitting can dilute the book twenty times.
+        honor_dismiss = card["sev"] < 2 or card["id"] == "capital_repair"
+        if when is not None and months - when < DISMISS_MONTHS and honor_dismiss:
             continue
         found.append(card)
     found.sort(key=lambda c: -c["sev"])
@@ -286,6 +292,9 @@ def _r_run_defense(state):
 def _r_capital_repair(state):
     reg = state["regulation"]
     if reg["pca"] == "well":
+        return None
+    last = state["bank"].get("last_common_raise_month")
+    if last is not None and state["economy"]["months"] - last < RAISE_COOLDOWN_MONTHS:
         return None
     r = REG.capital_ratios(state)
     shortfall = int(max(0, 0.09 * r["rwa"] - r["cet1"]) * 1.1)
@@ -379,8 +388,6 @@ def _r_hire_lender(state):
         util = 2.0
     else:
         util = bank["loans"]["stats"].get("originated_mtd", 0) / cap
-    if util < 0.88:
-        return None
     m = state["metrics"][-1] if state["metrics"] else {}
     ldr = m.get("loan_to_deposit") or (
         LN.total_loans(bank["loans"]) / max(1, L.total_deposits(bank["ledger"])))
@@ -394,18 +401,39 @@ def _r_hire_lender(state):
     preview = LN.preview_hire_lender(state)
     if not preview["positive"]:
         return None
+    assets = max(0, bank.get("cached_assets") or 0)
+    maxed = util >= 0.88
+    # Opening LDR sits 0.65–0.80 by design. Only nag a real franchise
+    # whose deposits have outrun the loan desk.
+    stuck = ldr < 0.70 and assets >= 80_000_000_00
+    if not maxed and not stuck:
+        return None
     lenders = bank["ops"]["staff"]["lenders"]
     sal = int(lenders["salary"] * bank["ops"]["salary_multiplier"])
+    if stuck and not maxed:
+        title = "Deposits are outrunning the loan book"
+        text = (
+            "Loan-to-deposit is %.0f%%. Your lenders can book about %s a "
+            "month; that will not catch a franchise this size. Another "
+            "lender costs about %s a year and the first-year book they "
+            "write is worth about %s of interest — net %s."
+            % (ldr * 100, _fm(cap), _fm(sal), _fm(preview["extra_ni"]),
+               _fm(preview["net"])))
+    else:
+        title = "Your lenders are maxed out"
+        text = (
+            "Loan production is running at %.0f%% of what your %d lender%s "
+            "can handle. Another lender costs about %s a year and the "
+            "first-year book they write is worth about %s of interest — "
+            "net %s. That is why this card is here."
+            % (util * 100, lenders["count"],
+               "s" if lenders["count"] != 1 else "",
+               _fm(sal), _fm(preview["extra_ni"]), _fm(preview["net"])))
     return _card(
-        "hire_lender", 1, "Your lenders are maxed out",
-        "Loan production is running at %.0f%% of what your %d lender%s can "
-        "handle. Another lender costs about %s a year and the first-year "
-        "book they write is worth about %s of interest — net %s. That is "
-        "why this card is here."
-        % (util * 100, lenders["count"], "s" if lenders["count"] != 1 else "",
-           _fm(sal), _fm(preview["extra_ni"]), _fm(preview["net"])),
+        "hire_lender", 1, title, text,
         "Lender headcount is a hard cap on monthly loan originations "
-        "(Operations tab). Skill and morale scale each lender's capacity.",
+        "(Operations tab). Skill, morale, and franchise size scale each "
+        "lender's capacity.",
         "ops",
         [_act("Hire a lender", "hire", {"role": "lenders", "count": 1})])
 
@@ -587,15 +615,17 @@ def _r_hoarding(state):
     if roe is None:
         return None
     if ea < 0.16 or payout > 40 or reg["pca"] != "well" or \
-            reg["camels"]["composite"] > 2 or roe > 0.10:
+            reg["camels"]["composite"] > 3 or roe > 0.10:
         return None
+    sev = 1 if ea >= 0.25 else 0
     return _card(
-        "hoarding", 0, "You're sitting on a pile of idle capital",
+        "hoarding", sev, "You're sitting on a pile of idle capital",
         "Equity is %.0f%% of assets — roughly double what a safe bank needs — "
         "and your return on equity is only %.1f%%. Idle capital makes owners "
-        "poor. Either put it to work (grow: branches, lenders, acquisitions) "
-        "or give it back (raise the dividend payout toward 50%%, or buy back "
-        "stock on the Treasury tab)." % (ea * 100, m.get("roe", 0) * 100),
+        "poor. An MOU does not stop you from growing. Either put it to work "
+        "(branches, lenders, acquisitions) or give it back (raise the "
+        "dividend payout toward 50%%, or buy back stock on the Treasury tab)."
+        % (ea * 100, m.get("roe", 0) * 100),
         "ROA measures the bank; ROE measures the owner. A fortress balance "
         "sheet with no plan is a savings account with overhead.",
         "treasury",
@@ -695,9 +725,21 @@ def _r_exam_prep(state):
 
 def _r_camels_repair(state):
     cam = state["regulation"]["camels"]["composite"]
-    if cam < 4:
+    if cam < 3:
         return None
     adv = REG.exam_recovery_advice(state)
+    if cam == 3:
+        return _card(
+            "camels_repair", 1,
+            "A 3 is an MOU — you can still grow",
+            "Examiners are watching, not freezing you. Open the next county, "
+            "hire, bid. A consent order (a 4) is what stops growth and M&A. "
+            "The world crown is won by people who keep expanding on a 3. "
+            + adv["needed"],
+            "An MOU is a letter. A consent order is a lock. The engine only "
+            "hard-blocks at composite 4.",
+            "risk",
+            [_goto("Open Risk & Reg", "risk")])
     body = adv["needed"] + " " + " ".join(adv["actions"][:3])
     return _card(
         "camels_repair", 2, "Your report card is a %d — here is the way out" % cam,

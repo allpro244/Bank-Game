@@ -20,9 +20,12 @@ parked until this pass makes the stated game playable.
 `DESIGN.md` is still the model reference. `ROADMAP.md` stays the index.
 This file is what we build next, in what order, and what “done” means.
 
-**Status (this PR):** I1–I7 are implemented in engine + UI. The $250B
-crown is **not** moved. The 60-year measurement pack is still the next
-gate before anyone touches the default goal.
+**Status:** I1–I7 shipped in PR #9. The crown is winnable (`PLAYTEST_WORLD_CROWN`
+on Claude’s report: $253B / y86). I8 (PR #10) breaks the CAMELS 3→MOU→M
+loop and the leftover playtest findings on that same build: metro offices
+no longer stack full catchments, lenders scale with franchise size, raise
+cards cool down, and Play until advances through a CAMELS 4 or an active
+run. The $250B number still does not move.
 
 ---
 
@@ -351,9 +354,9 @@ year-1 NI. A1 Dallas-90-day cap still holds.
 
 `open_branch` currently returns `"already have a branch in this
 market"`. Allow another office. Presence scales with count;
-catchments overlap (diminishing gather). Preview already has cost /
-year-1 gather / pro-forma capital — use it. Cannot close the last
-office (already true).
+catchments overlap (diminishing gather — `office_effective`, not
+`cap_one * n`). Preview already has cost / year-1 gather / pro-forma
+capital — use it. Cannot close the last office (already true).
 
 **Files.** `operations.py`, `deposits.py`, `web/app.js` (Ops rows).
 **Tests.** Second Caprock office opens; year-1 incremental gather <
