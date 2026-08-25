@@ -18,6 +18,8 @@ class TestPlayerUI(unittest.TestCase):
         self.assertEqual(s["unlock"]["branches"], 1)
         self.assertEqual(s["unlock"]["months_closed"], 0)
         self.assertGreater(s["unlock"]["months_to_exam"], 6)
+        self.assertIsInstance(s["econ"]["fed_funds"], float)
+        self.assertGreater(s["econ"]["fed_funds"], 0)
 
     def test_lending_queue_has_counter_preview(self):
         g = Game()

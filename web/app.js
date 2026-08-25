@@ -243,6 +243,13 @@ function renderTopbar() {
   const b = SUM.bank;
   $('tb-name').textContent = b.name;
   $('tb-date').textContent = SUM.time.display || SUM.time.date;
+  const ff = (SUM.econ || {}).fed_funds;
+  const ffEl = $('tb-ff');
+  if (ffEl) {
+    ffEl.textContent = pct(ff);
+    const wrap = $('tb-ff-wrap');
+    if (wrap) wrap.title = 'Overnight policy rate. Loans and deposits price off this.';
+  }
   $('tb-assets').textContent = fmc(b.assets);
   const cashEl = $('tb-cash');
   cashEl.textContent = fmc(b.cash);
