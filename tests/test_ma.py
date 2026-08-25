@@ -99,6 +99,17 @@ class TestMA(unittest.TestCase):
             self.assertLess(peak, 80_000_000_00, "seed %s peak $%s"
                             % (seed, f"{peak // 100:,}"))
 
+    def test_absorb_does_not_plant_a_window_farm(self):
+        state = new_game("Farm", seed=1)
+        before = sum(1 for b in state["bank"]["ops"]["branches"]
+                     if b.get("open") and b.get("market") == "austin")
+        engine._absorb_franchise(
+            state, ["austin"], 500_000_000_00, 300_000_000_00, 40, "Test Bank")
+        added = sum(1 for b in state["bank"]["ops"]["branches"]
+                    if b.get("open") and b.get("market") == "austin") - before
+        self.assertGreaterEqual(added, 1)
+        self.assertLessEqual(added, 3)
+
 
 if __name__ == "__main__":
     unittest.main()

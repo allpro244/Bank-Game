@@ -736,7 +736,10 @@ def _absorb_franchise(state, markets, deposits_amt, loans_amt, n_branches, src_n
             if amt > 0:
                 rate = loans.offer_rate(state, prod, "B", mid)
                 loans.add_to_pool(bank["loans"], prod, mid, "B", year, amt, rate, 1.1)
-    per_b = max(1, n_branches // len(mkts))
+    # A deal buys the books, not a window farm. Extra offices in one
+    # town overlap the same catchment, so 40 inherited Austins do not
+    # unlock 40 Dallases — they just rack rent.
+    per_b = max(1, min(3, n_branches // len(mkts)))
     for mid in mkts:
         for _ in range(per_b):
             bank["ops"]["branches"].append({
