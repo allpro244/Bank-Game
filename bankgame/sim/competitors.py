@@ -147,6 +147,46 @@ def living_banks(comp):
     return [b for b in comp["banks"] if b.get("alive")]
 
 
+def circling_rival(state, deal):
+    """The living rival most likely to close `deal` if the player waits."""
+    need = int((deal.get("assets") or 0) * 1.15)
+    if need <= 0:
+        return None
+    mid = deal.get("market")
+    cands = [b for b in living_banks(state["competitors"]) if b["assets"] >= need]
+    if not cands:
+        return None
+
+    def score(b):
+        s = 0.0
+        if b.get("strategy") == "roll_up":
+            s += 5.0
+        if mid and mid in (b.get("markets") or []):
+            s += 4.0
+        s += min(5.0, b["assets"] / max(1, need))
+        return s
+
+    return max(cands, key=score)
+
+
+def rival_takes_packet(state, deal, rival):
+    """A generated private book joins a living rival. Scalars only."""
+    take = int((deal.get("assets") or 0) * 0.90)
+    if take <= 0 or not rival or not rival.get("alive"):
+        return False
+    w_a = max(1, rival["assets"])
+    rival["assets"] += take
+    mark = float(deal.get("credit_mark") or 0.05)
+    rival["npa_ratio"] = round(min(0.12, (rival["npa_ratio"] * w_a
+                                          + mark * 0.4 * take) / (w_a + take)), 5)
+    rival["equity_ratio"] = round(
+        min(0.16, (rival["equity_ratio"] * w_a + 0.075 * take) / (w_a + take)), 5)
+    mid = deal.get("market")
+    if mid and mid not in (rival.get("markets") or []):
+        rival["markets"].append(mid)
+    return True
+
+
 def _size_growth_drag(assets_cents):
     """Money-center names slow toward GDP. Community names may still compound."""
     assets_b = max(0.01, assets_cents / 100 / 1_000_000_000)

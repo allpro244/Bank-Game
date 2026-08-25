@@ -264,6 +264,8 @@ def _process_month_boundary(state, prev_date):
     for ev in regulation.monthly_update(state, _rng(state, "misc")):
         raised.append(push_event(state, ev))
     _integration_month(state, _rng(state, "misc"))
+    for ev in _pipeline_month(state, _rng(state, "event")):
+        raised.append(push_event(state, ev))
 
     if quarter_end:
         loans.quarterly_cecl(state)
@@ -297,8 +299,9 @@ def _process_month_boundary(state, prev_date):
         if len(state["call_reports"]) > 120:
             del state["call_reports"][0]
         mt = state["metrics"][-1] if state["metrics"] else {}
+        stop_q = bool(bank.get("policies", {}).get("stop_on_quarter"))
         raised.append(push_event(state, {
-            "type": "quarter_close", "blocking": True,
+            "type": "quarter_close", "blocking": stop_q,
             "ni": bank["last_quarter_net_income"],
             "cet1": mt.get("cet1_ratio"),
             "ldr": mt.get("loan_to_deposit"),
@@ -425,7 +428,8 @@ def _eligible_ma_markets(state):
     else:
         cap = 4
     allowed = [mid for mid, r in state["regions"].items()
-               if rank.get(r["kind"], 4) <= cap]
+               if rank.get(r["kind"], 4) <= cap
+               and regions.market_unlocked(state, mid)]
     served = [m for m in allowed if m in state["bank"]["deposits"]["pools"]]
     return served or allowed
 
@@ -515,27 +519,46 @@ def _ma_opportunities(state, rng):
                     "market": target_mkt, "credit_mark": round(rng.uniform(0.02, 0.09), 3)}
             pf = deal_proforma(state, deal)
             deal["proforma"] = pf
+            rival = competitors.circling_rival(state, deal)
+            if rival:
+                deal["circling_id"] = rival["id"]
+                deal["circling_name"] = rival["name"]
+            choices = ["buy", "hold", "pass"]
+            if state["bank"].get("listed"):
+                choices = ["buy", "buy_stock", "hold", "pass"]
+            if rival:
+                threat = (
+                    "\n\n%s is circling this book. Buy now, hold it in diligence "
+                    "(about three months — they may close while you raise), or pass "
+                    "and they likely take it this week." % rival["name"])
+            else:
+                threat = ("\n\nNo living rival can fund this book. Hold or pass "
+                          "without losing it to the street.")
+            close_note = (
+                (" Cannot close: " + "; ".join(pf["blockers"]) + ".")
+                if pf["blockers"] else
+                " Regulatory approval still needs CAMELS 1-2, no orders, "
+                "satisfactory CRA.")
+            if state["bank"].get("listed"):
+                close_note += " Listed: you can pay 40% in stock at the last print."
             events.append({
                 "type": "bank_for_sale", "blocking": True,
+                "choices": choices,
                 "title": "Acquisition opportunity: %s" % name,
                 "text": ("%s (assets $%sM, based in %s) is quietly for sale. "
                          "That is %.2f× your bank. Price: $%s "
                          "(%.2fx tangible book). Due diligence estimates a %d%% credit mark "
                          "on their loans and typical integration attrition of 5-12%% of "
                          "deposits.\n\nPro-forma after close: CET1 %.1f%%, leverage %.1f%% "
-                         "(%s-capitalized).%s"
+                         "(%s-capitalized).%s%s"
                          % (name, f"{t_assets // 100 // 1_000_000:,}",
                             state["regions"][target_mkt]["name"],
                             t_assets / max(1, assets),
                             f"{price // 100:,}",
                             mult, int(deal["credit_mark"] * 100),
                             pf["cet1"] * 100, pf["leverage"] * 100, pf["pca"],
-                            (" Cannot close: " + "; ".join(pf["blockers"]) + ".")
-                            if pf["blockers"] else
-                            " Regulatory approval still needs CAMELS 1-2, no orders, "
-                            "satisfactory CRA.")),
+                            close_note, threat)),
                 "deal": deal,
-                "choices": ["buy", "pass"],
             })
 
     if assets > 100_000_000_00 and rng.chance(0.02) and \
@@ -646,15 +669,20 @@ def _resolve_fdic_bid(state, ev, premium_bp):
                           fr["branches"])}
 
 
-def _resolve_bank_purchase(state, ev):
+def _resolve_bank_purchase(state, ev, stock_frac=0.0):
     bank = state["bank"]
     deal = ev["deal"]
     pf = deal_proforma(state, deal)
     if not pf["can_buy"]:
         return "Cannot close: " + "; ".join(pf["blockers"]) + "."
-    from .funding import ensure_cash
-    if ensure_cash(state, deal["price"]) < deal["price"]:
-        return "Not enough cash for the purchase price ($%s)." % f"{deal['price'] // 100:,}"
+    stock_frac = 0.40 if stock_frac else 0.0
+    if stock_frac and not bank.get("listed"):
+        return "stock as deal currency requires a listing"
+    cash_part = int(deal["price"] * (1.0 - stock_frac))
+    stock_part = deal["price"] - cash_part
+    from .funding import ensure_cash, share_quote
+    if ensure_cash(state, cash_part) < cash_part:
+        return "Not enough cash for the purchase price ($%s)." % f"{cash_part // 100:,}"
 
     t_assets = deal["assets"]
     t_deposits = int(t_assets * 0.82)
@@ -664,7 +692,9 @@ def _resolve_bank_purchase(state, ev):
     net_assets = t_loans + t_sec + t_cash - t_deposits
     goodwill = max(0, deal["price"] - net_assets)
     lines = [["1300", t_loans, 0], ["1200", t_sec, 0], ["1000", t_cash, 0],
-             ["1600", goodwill, 0], ["1000", 0, deal["price"]]]
+             ["1600", goodwill, 0], ["1000", 0, cash_part]]
+    if stock_part > 0:
+        lines.append(["3000", 0, stock_part])
     if goodwill == 0 and deal["price"] < net_assets:
         lines.append(["4150", 0, net_assets - deal["price"]])   # bargain purchase gain
     split = {"2000": 0.25, "2010": 0.10, "2020": 0.15, "2030": 0.28, "2040": 0.22}
@@ -674,6 +704,11 @@ def _resolve_bank_purchase(state, ev):
         amt = t_deposits - alloc if i == len(keys) - 1 else int(t_deposits * split[acct])
         alloc += amt
         lines.append([acct, 0, amt])
+    issued = 0
+    if stock_part > 0:
+        q = share_quote(state)
+        issued = stock_part // max(1, q["px"])
+        bank["shares"] += issued
     L.post(bank["ledger"], state["time"]["date"],
            "Acquisition of %s" % deal["name"], lines, tag="ma")
     # acquired securities become AFS treasuries of medium tenor
@@ -690,9 +725,13 @@ def _resolve_bank_purchase(state, ev):
     _absorb_franchise(state, [deal["market"]], t_deposits, t_loans, branches, deal["name"])
     bank["acquisitions"].append({"name": deal["name"], "date": state["time"]["date"],
                                  "price": deal["price"], "attrition_months": 9})
+    extra = ""
+    if issued:
+        extra = " Paid %s in new stock (%s shares)." % (
+            f"${stock_part // 100:,}", f"{issued:,}")
     return {"message": "The deal closed. %s is now part of %s. Goodwill booked: $%s. "
-                       "Expect deposit attrition during integration."
-                       % (deal["name"], bank["name"], f"{goodwill // 100:,}")}
+                       "Expect deposit attrition during integration.%s"
+                       % (deal["name"], bank["name"], f"{goodwill // 100:,}", extra)}
 
 
 def _split_cents(total, weights):
@@ -736,7 +775,9 @@ def _absorb_franchise(state, markets, deposits_amt, loans_amt, n_branches, src_n
             if amt > 0:
                 rate = loans.offer_rate(state, prod, "B", mid)
                 loans.add_to_pool(bank["loans"], prod, mid, "B", year, amt, rate, 1.1)
-    per_b = max(1, n_branches // len(mkts))
+    # A deal buys the books, not a window farm. Extra offices in one
+    # town overlap the same catchment.
+    per_b = max(1, min(3, n_branches // len(mkts)))
     for mid in mkts:
         for _ in range(per_b):
             bank["ops"]["branches"].append({
@@ -744,6 +785,119 @@ def _absorb_franchise(state, markets, deposits_amt, loans_amt, n_branches, src_n
                 "quality": 2, "monthly_cost": operations.BRANCH_MONTHLY,
                 "opened": state["time"]["date"], "acquired_from": src_name})
             bank["ops"]["next_branch_id"] += 1
+
+
+def pipeline(state):
+    return state.setdefault("ma_pipeline", [])
+
+
+def park_deal(state, ev):
+    """Hold a private deal in diligence. Clock can run; a rival may close."""
+    deal = ev.get("deal")
+    if not deal:
+        return "no deal to hold"
+    pipe = pipeline(state)
+    if any(x.get("deal", {}).get("name") == deal.get("name") for x in pipe):
+        return "that book is already in diligence"
+    if len(pipe) >= 2:
+        return "you already have two books in diligence"
+    rid = state.setdefault("next_pipeline_id", 1)
+    state["next_pipeline_id"] = rid + 1
+    item = {
+        "id": rid,
+        "deal": deal,
+        "rival_id": deal.get("circling_id"),
+        "rival_name": deal.get("circling_name"),
+        "months_left": 3,
+        "parked": state["time"]["date"],
+    }
+    pipe.append(item)
+    return item
+
+
+def rival_closes_deal(state, item):
+    """A circling rival buys the packet. Player ledger unchanged."""
+    deal = item.get("deal") or {}
+    rival = competitors.find_rival(state, item.get("rival_id"))
+    if rival is None or not rival.get("alive"):
+        rival = competitors.circling_rival(state, deal)
+    took = False
+    if rival:
+        took = competitors.rival_takes_packet(state, deal, rival)
+    name = deal.get("name") or "the target"
+    who = (rival or {}).get("name") or "A larger bank"
+    town = state["regions"].get(deal.get("market"), {}).get("name", "")
+    if took:
+        title = "%s bought %s" % (who, name)
+        text = ("%s closed the book you were sizing%s. That franchise "
+                "is off the map. Next time, buy or pass — holding is a bet "
+                "they wait."
+                % (who, (" in %s" % town) if town else ""))
+    else:
+        title = "%s came off the market" % name
+        text = "The seller walked. No living rival could fund the book either."
+    return {
+        "type": "deal_stolen", "blocking": True,
+        "title": title, "text": text,
+        "deal_name": name,
+        "rival_name": who if took else None,
+        "stolen": took,
+    }
+
+
+def _pipeline_month(state, rng):
+    """Each month on the market raises the chance a rival closes."""
+    events = []
+    keep = []
+    for item in list(pipeline(state)):
+        item["months_left"] = int(item.get("months_left") or 0) - 1
+        early = bool(item.get("rival_id")) and rng.chance(0.18)
+        if item["months_left"] <= 0 or early:
+            events.append(rival_closes_deal(state, item))
+            continue
+        keep.append(item)
+    state["ma_pipeline"] = keep
+    return events
+
+
+def close_pipeline_deal(state, item_id, stock_frac=0.0):
+    pipe = pipeline(state)
+    item = next((x for x in pipe if x["id"] == item_id), None)
+    if item is None:
+        return "that deal is no longer on the market"
+    item["deal"]["proforma"] = deal_proforma(state, item["deal"])
+    res = _resolve_bank_purchase(state, {"deal": item["deal"]},
+                                 stock_frac=stock_frac)
+    if isinstance(res, str):
+        return res
+    pipe.remove(item)
+    return res
+
+
+def pass_private_deal(state, deal, force=None):
+    """Walk away from a private book. A circling rival often takes it."""
+    rival = competitors.find_rival(state, deal.get("circling_id")) \
+        or competitors.circling_rival(state, deal)
+    rng = _rng(state, "event")
+    steal = force if force is not None else (bool(rival) and rng.chance(0.70))
+    if steal and rival and competitors.rival_takes_packet(state, deal, rival):
+        return {
+            "message": "You passed. %s bought %s the same week."
+                       % (rival["name"], deal.get("name") or "the bank"),
+            "stolen": True, "rival_name": rival["name"],
+        }
+    return {"message": "You passed. The seller stayed independent.",
+            "stolen": False}
+
+
+def drop_pipeline_deal(state, item_id):
+    pipe = pipeline(state)
+    item = next((x for x in pipe if x["id"] == item_id), None)
+    if item is None:
+        return "that deal is no longer on the market"
+    res = pass_private_deal(state, item.get("deal") or {})
+    pipe.remove(item)
+    return res
 
 
 def _integration_month(state, rng):
@@ -813,7 +967,8 @@ def advance(state, unit="day", skip_inbox=False, max_days=None):
 
     `until` is Play until: run day-by-day until an interrupt (or max_days).
     The credit box (if enabled) handles matching memos so they do not stop
-    the clock. Advisor never writes the box.
+    the clock. Quarter close is a log line unless policies.stop_on_quarter.
+    Advisor never writes the box.
     """
     if unit == "until":
         n = int(max_days or 1260)
@@ -995,6 +1150,20 @@ def perform_action(state, action, payload):
             raise ActionError(res)
         return {"message": "Preferred issued at %.2f%%." % (res["rate"] * 100)}
 
+    if action == "preview_list_common":
+        res = funding.listing_preview(state)
+        if isinstance(res, str):
+            raise ActionError(res)
+        return res
+
+    if action == "list_common":
+        res = funding.list_common(state)
+        if isinstance(res, str):
+            raise ActionError(res)
+        return {"message": "Listed at $%s a share (%.2fx book). Fees %s." % (
+            f"{res['px'] // 100:,}", res["price_to_book"],
+            f"${res['fees'] // 100:,}")}
+
     if action == "buyback":
         res = funding.buyback(state, int(_num("amount", 1)))
         if isinstance(res, str):
@@ -1113,6 +1282,32 @@ def perform_action(state, action, payload):
         advisor.tutorial_off(state)
         return {"message": "Tour dismissed. It won't come back."}
 
+    if action == "sell_loans":
+        res = loans.sell_loans(
+            state,
+            kind=str(p.get("kind") or "pool"),
+            product=p.get("product"),
+            market=p.get("market"),
+            amount=p.get("amount"),
+            loan_id=p.get("loan_id"),
+        )
+        if isinstance(res, str):
+            raise ActionError(res)
+        return res
+
+    if action == "close_pipeline":
+        stock = 0.40 if p.get("stock") else 0.0
+        res = close_pipeline_deal(state, int(_num("pipeline_id")), stock_frac=stock)
+        if isinstance(res, str):
+            raise ActionError(res)
+        return res
+
+    if action == "drop_pipeline":
+        res = drop_pipeline_deal(state, int(_num("pipeline_id")))
+        if isinstance(res, str):
+            raise ActionError(res)
+        return res
+
     if action == "retire":
         _game_over(state, "retired")
         return {"message": "You retired. See the epilogue."}
@@ -1134,8 +1329,17 @@ def _handle_event_choice(state, ev, choice, payload):
 
     if ev["type"] == "bank_for_sale":
         if choice == "pass":
-            return {"message": "You passed on the deal."}
-        res = _resolve_bank_purchase(state, ev)
+            return pass_private_deal(state, ev.get("deal") or {})
+        if choice == "hold":
+            item = park_deal(state, ev)
+            if isinstance(item, str):
+                raise ActionError(item)
+            who = (ev.get("deal") or {}).get("circling_name") or "a rival"
+            return {"message": "The book is in diligence. %s is still circling. "
+                               "You have about three months." % who,
+                    "pipeline_id": item["id"]}
+        stock = 0.40 if choice == "buy_stock" else 0.0
+        res = _resolve_bank_purchase(state, ev, stock_frac=stock)
         if isinstance(res, str):
             raise ActionError(res)
         return res
@@ -1237,6 +1441,7 @@ def _resolve_overnight_choice(state, ev, choice):
 POLICY_SPECS = [
     # (prefix, keys-or-None, type, lo, hi)
     ("deposits.offsets_bp.", list(deposits.PRODUCTS), int, -300, 300),
+    ("deposits.market_offsets_bp.", None, int, -300, 300),
     ("deposits.promo_cd_bonus", None, float, 0.0, 0.03),
     ("deposits.fees.monthly_fee", None, int, 0, 50_00),
     ("deposits.fees.overdraft_fee", None, int, 0, 75_00),
@@ -1263,6 +1468,7 @@ POLICY_SPECS = [
     ("fraud.threshold", None, int, 0, 4),
     ("regulation.bsa.program_spend", None, int, 0, 100_000_000_00),
     ("policies.dividend_payout", None, int, 0, 100),
+    ("policies.stop_on_quarter", None, (True, False), None, None),
     ("funding.overnight_policy", None, ("ask", "auto"), None, None),
 ]
 
@@ -1304,6 +1510,18 @@ def set_policy(state, path, value):
         if path.startswith("loans.credit_box."):
             loans.credit_box(state)
         parts = path.split(".")
+        if path.startswith("deposits.market_offsets_bp."):
+            if len(parts) != 4:
+                raise ActionError("town offset path is deposits.market_offsets_bp.<market>.<product>")
+            mid, prod = parts[2], parts[3]
+            if mid not in state["regions"]:
+                raise ActionError("unknown market")
+            if prod not in deposits.PRODUCTS:
+                raise ActionError("unknown product")
+            book = state["bank"]["deposits"].setdefault("market_offsets_bp", {})
+            town = book.setdefault(mid, {})
+            town[prod] = value
+            return {"path": path, "value": value}
         target = state["bank"] if parts[0] != "regulation" else state
         node = target
         for part in parts[:-1]:

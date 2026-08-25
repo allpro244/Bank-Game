@@ -16,6 +16,7 @@ from .sim import deposits as DEP, loans as LN, regulation as REG, funding as FUN
 from .sim import fraud as FR, crises as CRI
 from .sim import advisor as ADV
 from .sim import operations as OPS
+from .sim import regions
 from .sim.newgame import new_game
 from .sim import goals as GOALS
 
@@ -132,6 +133,7 @@ class Game:
                 "exam_path": (REG.exam_recovery_advice(s)
                               if s["regulation"]["camels"]["composite"] >= 4
                               else None),
+                "pipeline": s.get("ma_pipeline") or [],
             },
             "unlock": {
                 "months_closed": len(s["metrics"]),
@@ -186,6 +188,7 @@ class Game:
                 "relationships": bank["loans"].get("relationships", [])[-20:],
                 "credit_box": LN.credit_box(s),
                 "hire_preview": LN.preview_hire_lender(s),
+                "loan_sales": LN.sellable_strips(s),
             }
 
         if name == "deposits":
@@ -200,7 +203,12 @@ class Game:
                 }
             return {
                 "offsets_bp": bank["deposits"]["offsets_bp"],
+                "market_offsets_bp": bank["deposits"].get("market_offsets_bp") or {},
                 "effective_rates": {p: DEP.effective_rate(s, p) for p in DEP.PRODUCTS},
+                "town_rates": {
+                    mid: {p: DEP.effective_rate(s, p, mid) for p in DEP.PRODUCTS}
+                    for mid in bank["deposits"]["pools"]
+                },
                 "promo_cd_bonus": bank["deposits"]["promo_cd_bonus"],
                 "fees": bank["deposits"]["fees"],
                 "totals": DEP.totals(bank["deposits"]),
@@ -242,10 +250,14 @@ class Game:
                 "liquidity_ratio": lr, "liquid_assets": liquid,
                 "shares": bank["shares"],
                 "tbv": L.total_equity(ledger) - ledger["balances"]["1600"],
+                "quote": FUND.share_quote(s),
+                "listing": FUND.listing_preview(s),
+                "listed": bool(bank.get("listed")),
                 "dividend_payout": bank["policies"]["dividend_payout"],
                 "aoci": -ledger["balances"]["3200"],
                 "overnight_policy": bank["funding"].get("overnight_policy", "ask"),
                 "raise_preview": FUND.preview_raise_common(s, 2_000_000_00),
+                "eve": securities.eve_report(s),
             }
 
         if name == "ops":
@@ -293,6 +305,8 @@ class Game:
                 "exam_path": (REG.exam_recovery_advice(s)
                               if s["regulation"]["camels"]["composite"] >= 3
                               else None),
+                "mras": REG.live_mras(s["regulation"]),
+                "eve": securities.eve_report(s),
                 "orders": s["regulation"]["orders"],
                 "cra": s["regulation"]["cra"],
                 "months_to_exam": s["regulation"]["months_to_exam"],
@@ -341,6 +355,8 @@ class Game:
                     "my_branches": len([b for b in bank["ops"]["branches"]
                                         if b["market"] == mid and b["open"]]),
                     "brand": bank["ops"]["brand"].get(mid, 0),
+                    "unlock_assets": int(r.get("unlock_assets") or 0),
+                    "unlocked": regions.market_unlocked(s, mid),
                     "history": r["history"][-120:],
                 }
             peers = competitors.peer_group(s)
@@ -422,8 +438,11 @@ class Game:
                     "loans": _queue_payload(bank["loans"]["queue"]),
                     "fraud": open_cases,
                 },
+                "pipeline": s.get("ma_pipeline") or [],
                 "peer_avg": ADV.peer_averages(s),
                 "goal": GOALS.progress(s),
+                "stop_on_quarter": bool(
+                    bank.get("policies", {}).get("stop_on_quarter")),
             }
 
         if name == "events":

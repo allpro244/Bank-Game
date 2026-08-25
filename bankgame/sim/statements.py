@@ -67,6 +67,7 @@ INCOME_LAYOUT = [
     ("Wire and treasury management", ["4120"]),
     ("Trust and wealth management", ["4130"]),
     ("Mortgage banking", ["4160"]),
+    ("Loan sales", ["4165", "-5185"]),
     ("Securities gains (losses)", ["4140", "-5180"]),
     ("Investment banking", ["4170"]),
     ("Other noninterest income", ["4150"]),
@@ -120,11 +121,11 @@ def _layout_income(agg, labels):
     int_inc = _sum_codes(agg, ["4000", "4010", "4020"])
     int_exp = _sum_codes(agg, ["5000", "5010", "5020"])
     nii = int_inc - int_exp
-    fee_inc = _sum_codes(agg, ["4100", "4110", "4120", "4130", "4150", "4160", "4170"])
+    fee_inc = _sum_codes(agg, ["4100", "4110", "4120", "4130", "4150", "4160", "4165", "4170"])
     sec_gl = _sum_codes(agg, ["4140", "-5180"])
     provision = agg.get("5150", 0)
     opex = _sum_codes(agg, ["5100", "5110", "5120", "5130", "5140", "5160",
-                            "5170", "5200", "5210", "5220"])
+                            "5170", "5185", "5200", "5210", "5220"])
     tax = agg.get("5190", 0)
     pretax = nii - provision + fee_inc + sec_gl - opex
     net = pretax - tax
@@ -188,9 +189,9 @@ def compute_metrics(state):
             agg[code] = agg.get(code, 0) + amt
     int_inc = _sum_codes(agg, ["4000", "4010", "4020"]) * scale
     int_exp = _sum_codes(agg, ["5000", "5010", "5020"]) * scale
-    fee_inc = _sum_codes(agg, ["4100", "4110", "4120", "4130", "4150", "4160", "4170"]) * scale
+    fee_inc = _sum_codes(agg, ["4100", "4110", "4120", "4130", "4150", "4160", "4165", "4170"]) * scale
     opex = _sum_codes(agg, ["5100", "5110", "5120", "5130", "5140", "5160",
-                            "5170", "5200", "5210", "5220"]) * scale
+                            "5170", "5185", "5200", "5210", "5220"]) * scale
     ncos = 0  # tracked separately
 
     earning_assets = (loans + ledger["balances"]["1200"] + ledger["balances"]["1210"]

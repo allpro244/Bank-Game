@@ -34,11 +34,21 @@ def new_regulation():
                 "sars_filed": 0, "ctrs_filed": 0, "fined": False},
         "cra": "Satisfactory",
         "exam_reports": [],
+        "mras": [],                  # examiner matters requiring attention
+        "next_mra_id": 1,
         "idle_letter_month": 0,
         "fdic_special": 0.0,
         "seized": False,
         "stress_test_buffer": 0.0,
     }
+
+
+def ensure(state):
+    """Old saves may lack MRA fields. No other mutation."""
+    reg = state["regulation"]
+    reg.setdefault("mras", [])
+    reg.setdefault("next_mra_id", 1)
+    return reg
 
 
 def capital_ratios(state):
@@ -231,7 +241,7 @@ def _pca_text(pca):
 def monthly_update(state, rng):
     """Exam countdown + BSA/AML program health."""
     bank = state["bank"]
-    reg = state["regulation"]
+    reg = ensure(state)
     events = []
 
     # BSA/AML spend is a real monthly bill, not a free slider.
@@ -332,9 +342,153 @@ def independent_orders(reg):
     return [o for o in (reg.get("orders") or []) if o not in SELF_ORDERS]
 
 
+def live_mras(reg):
+    return [m for m in (reg.get("mras") or []) if m.get("status") in ("open", "missed")]
+
+
+def missed_mra_outstanding(reg):
+    return any(m.get("status") == "missed" for m in (reg.get("mras") or []))
+
+
+def supervisory_metrics(state):
+    """The numbers MRAs grade. Same formulas as the exam report. No mutation."""
+    r = capital_ratios(state)
+    from .loans import npl_balance
+    npa = npl_balance(state["bank"]["loans"]) + state["bank"]["ledger"]["balances"]["1550"]
+    assets = max(1, r["assets"])
+    lr, _ = liquidity_ratio(state)
+    htm_un = state["bank"].get("cached_htm_unrealized", 0)
+    aoci = -state["bank"]["ledger"]["balances"]["3200"]
+    rate_risk = -(min(0, htm_un) + min(0, aoci)) / max(1, r["cet1"])
+    return {
+        "liquidity_ratio": lr,
+        "cet1_ratio": r["cet1_ratio"],
+        "npa_ratio": npa / assets,
+        "rate_risk": rate_risk,
+        "roa_ttm": state["bank"].get("roa_ttm", 0.0),
+        "bsa_score": state["regulation"]["bsa"]["score"],
+    }
+
+
+# Priority order. A 3+ exam writes at most two. A 1–2 writes none.
+MRA_TEMPLATES = [
+    {"kind": "liquidity", "comp": "L",
+     "metric": "liquidity_ratio", "target": 0.10, "op": "gte",
+     "text": "Raise liquid assets above 10 percent of total assets by the next examination.",
+     "owner": "Cash and sellable bonds must be at least 10% of the book by the next visit."},
+    {"kind": "capital", "comp": "C",
+     "metric": "cet1_ratio", "target": 0.10, "op": "gte",
+     "text": "Restore the CET1 capital ratio to at least 10.0 percent by the next examination.",
+     "owner": "Core capital must be back above 10% of risk-weighted assets by the next visit."},
+    {"kind": "npa", "comp": "A",
+     "metric": "npa_ratio", "target": 0.015, "op": "lte",
+     "text": "Reduce nonperforming assets to no more than 1.5 percent of total assets by the next examination.",
+     "owner": "Bad loans and foreclosed property must be under 1.5% of assets by the next visit."},
+    {"kind": "duration", "comp": "S",
+     "metric": "rate_risk", "target": 0.15, "op": "lte",
+     "text": "Reduce unrealized securities depreciation to no more than 15 percent of CET1 by the next examination.",
+     "owner": "Paper losses on the bond book must be under 15% of capital by the next visit."},
+    {"kind": "earnings", "comp": "E",
+     "metric": "roa_ttm", "target": 0.009, "op": "gte",
+     "need_earnings": True,
+     "text": "Restore trailing return on assets to at least 0.90 percent by the next examination.",
+     "owner": "A quiet year near 1% ROA. The next visit will check the trailing number."},
+    {"kind": "bsa", "comp": "M",
+     "metric": "bsa_score", "target": 0.75, "op": "gte",
+     "text": "Raise the BSA/AML program score above 75 percent by the next examination.",
+     "owner": "Staff compliance and fund the BSA program before they come back."},
+]
+
+
+def _mra_holds(item, metrics):
+    val = metrics.get(item["metric"])
+    if val is None:
+        return False
+    if item["op"] == "gte":
+        return val + 1e-12 >= item["target"]
+    return val <= item["target"] + 1e-12
+
+
+def grade_open_mras(state):
+    """Mark open/missed MRAs met or still missed. Returns items that changed."""
+    ensure(state)
+    metrics = supervisory_metrics(state)
+    just = []
+    for item in state["regulation"]["mras"]:
+        if item["status"] not in ("open", "missed"):
+            continue
+        if _mra_holds(item, metrics):
+            item["status"] = "met"
+            item["resolved"] = state["time"]["date"]
+            just.append(item)
+        elif item["status"] == "open":
+            item["status"] = "missed"
+            item["resolved"] = state["time"]["date"]
+            just.append(item)
+    return just
+
+
+def issue_mras(state, comps, composite):
+    """After a 3+, write 1–2 items the player does not already meet.
+    A 1 or 2 closes leftover open items and writes none."""
+    ensure(state)
+    reg = state["regulation"]
+    if composite <= 2:
+        for item in reg["mras"]:
+            if item["status"] == "open":
+                item["status"] = "closed"
+                item["resolved"] = state["time"]["date"]
+        return []
+    live = live_mras(reg)
+    live_kinds = {m["kind"] for m in live}
+    slots = max(0, 2 - len(live))
+    if slots <= 0:
+        return []
+    metrics = supervisory_metrics(state)
+    mrow = state["metrics"][-1] if state.get("metrics") else {}
+    issued = []
+    for tmpl in MRA_TEMPLATES:
+        if slots <= 0:
+            break
+        if tmpl["kind"] in live_kinds:
+            continue
+        if comps.get(tmpl["comp"], 2) < 3:
+            continue
+        if tmpl.get("need_earnings") and not mrow.get("earnings_ready"):
+            continue
+        if _mra_holds(tmpl, metrics):
+            continue
+        item = {
+            "id": reg["next_mra_id"],
+            "kind": tmpl["kind"],
+            "metric": tmpl["metric"],
+            "target": tmpl["target"],
+            "op": tmpl["op"],
+            "text": tmpl["text"],
+            "owner": tmpl["owner"],
+            "status": "open",
+            "issued": state["time"]["date"],
+            "due": "next examination",
+        }
+        reg["next_mra_id"] += 1
+        reg["mras"].append(item)
+        issued.append(item)
+        slots -= 1
+    return issued
+
+
+def _trim_mras(reg):
+    if len(reg["mras"]) <= 24:
+        return
+    live = live_mras(reg)
+    done = [m for m in reg["mras"] if m.get("status") not in ("open", "missed")]
+    keep = max(0, 24 - len(live))
+    reg["mras"] = live + done[-keep:]
+
+
 def run_exam(state, rng):
     bank = state["bank"]
-    reg = state["regulation"]
+    reg = ensure(state)
     econ = state["economy"]
     r = capital_ratios(state)
     from . import ledger as LL
@@ -405,9 +559,15 @@ def run_exam(state, rng):
         M += 0   # acceptable with analysts
         if bank["ops"]["staff"]["credit_analysts"]["count"] < 1:
             M += 1
+    # Grade outstanding MRAs before M so a miss is earned this visit,
+    # not a leftover from the letter this exam is about to write.
+    grade_open_mras(state)
     # Only independently earned orders grade M. The MOU/consent this
-    # exam writes must not force the next composite.
+    # exam writes must not force the next composite. A missed MRA is
+    # a real miss — not the MOU self-loop.
     if independent_orders(reg):
+        M += 1
+    if missed_mra_outstanding(reg):
         M += 1
     if bank["ops"]["audit_spend"] < assets * 0.0000015:
         M += 1
@@ -454,6 +614,8 @@ def run_exam(state, rng):
         reg["cra"] = "Needs to Improve"
 
     reg["months_to_exam"] = {1: 18, 2: 15, 3: 12, 4: 6, 5: 4}[composite]
+    issue_mras(state, comps, composite)
+    _trim_mras(reg)
     report = _write_report(state, comps, composite, r, npa_ratio, lr, wd, rate_risk, cre_conc)
     reg["exam_reports"].append({"date": state["time"]["date"], "composite": composite,
                                 "components": comps, "text": report})
@@ -524,6 +686,15 @@ def _write_report(state, comps, composite, r, npa_ratio, lr, wd, rate_risk, cre_
                      "effect: capital distributions are PROHIBITED and asset growth is "
                      "RESTRICTED until ratings improve. Failure to comply will result in "
                      "further action, including receivership.")
+    live = live_mras(reg)
+    if live:
+        lines.append("")
+        lines.append("MATTERS REQUIRING ATTENTION:")
+        for m in live:
+            tag = "MISSED — " if m["status"] == "missed" else ""
+            lines.append("  • %s%s" % (tag, m["text"]))
+        lines.append("Missed items grade Management at the next examination. "
+                     "Meeting them does not.")
     return "\n".join(lines)
 
 
@@ -555,6 +726,9 @@ def exam_recovery_advice(state):
     for k, v in comps.items():
         if v >= 3:
             actions.append("%s is a %d — %s" % (COMP_OWNER[k], v, _RECOVERY[k]))
+    for m in live_mras(state["regulation"]):
+        tag = "Missed MRA: " if m.get("status") == "missed" else "MRA: "
+        actions.append(tag + m.get("owner") or m.get("text") or "")
     return {
         "composite": composite,
         "components": comps,

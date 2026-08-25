@@ -332,7 +332,7 @@ function renderNav() {
      <div class="tab" onclick="showGlossary()"><span>📖 Glossary</span></div>
      <div class="tab" onclick="toggleMode()" title="Owner view: plain language. Banker view: full jargon. Same game.">
        <span>⇄ ${MODE === 'owner' ? 'Owner view' : 'Banker view'}</span></div>
-     <div class="helptip" style="padding:8px 14px;line-height:1.35">Keys: space day · w week · m month · q quarter · u play until. Week/month/quarter stop if Your Desk has a decision. Play until uses your credit box.</div>`;
+     <div class="helptip" style="padding:8px 14px;line-height:1.35">Keys: space day · w week · m month · q quarter · u play until. Week/month/quarter stop if Your Desk has a decision. Play until uses your credit box and does not stop on quarter close unless you opt in.</div>`;
 }
 
 async function switchTab(id) {
@@ -422,6 +422,7 @@ async function tabDesk(m) {
       <b>Report card is a ${SUM.franchise.camels}.</b> ${esc(SUM.franchise.exam_path.needed || '')}
       ${(SUM.franchise.exam_path.actions || []).slice(0, 2).map(a => ' ' + esc(a)).join('')}
     </div>` : ''}
+    ${pipelineBanner(d.pipeline || (SUM.franchise && SUM.franchise.pipeline))}
 
     <div class="gauges">
       ${g.map(x => `
@@ -443,7 +444,13 @@ async function tabDesk(m) {
 
     <div class="panel tight" style="margin:10px 0">
       <button class="primary" onclick="advance('until')">Play until something needs you</button>
-      <span class="sub"> — runs the clock. Your credit box (Lending) handles matching memos. Stops on exams, runs, fraud, overnight holes, and anything outside the box.</span>
+      <label class="sub" style="margin-left:12px;white-space:nowrap">
+        <input type="checkbox" ${d.stop_on_quarter ? 'checked' : ''}
+          style="width:auto;margin-right:4px"
+          onchange="setPol('policies.stop_on_quarter', this.checked)">
+        Stop every quarter
+      </label>
+      <span class="sub"> — runs the clock. Your credit box (Lending) handles matching memos. Stops on exams, runs, fraud, overnight holes, and anything outside the box. Quarter close goes to the log unless you opt in.</span>
     </div>
     <h3>Inbox — decisions waiting on you</h3>
     <div class="panel">
@@ -854,6 +861,20 @@ async function tabLending(m) {
         · participated: ${d.stats.participated_apps || 0}
         · box handled: ${d.stats.box_handled || 0}</div>
 
+      <h3>Sell a seasoned book</h3>
+      <div class="helptip">A strip you already own, sold to a living rival. New mortgages still use the slider above. This is not a tape — you cannot buy someone else's loans here.</div>
+      ${(d.loan_sales || []).length ? `<table><tr><th>Book</th><th>Town</th><th class="r">Par</th>
+        <th class="r">Price</th><th>Buyer</th><th></th></tr>
+        ${d.loan_sales.map(s => `<tr>
+          <td>${esc(s.label)}</td>
+          <td>${esc(s.market_name || '')}</td>
+          <td class="r">${fm(s.par)}</td>
+          <td class="r ${cls(s.gain)}">${fm(s.price)} <span class="sub">${(s.px_par * 100).toFixed(1)}¢</span></td>
+          <td>${esc(s.buyer_name)}</td>
+          <td><button class="small" onclick='confirmLoanSale(${jattr(s)})'>Review</button></td>
+        </tr>`).join('')}</table>`
+        : '<span class="sub">No performing strip of $250k+ right now.</span>'}
+
       <h3>OREO (foreclosed real estate)</h3>
       ${d.oreo.length ? `<table><tr><th>Market</th><th class="r">Carrying value</th><th class="r">Months held</th></tr>
         ${d.oreo.map(o => `<tr><td>${esc(o.market)}</td><td class="r">${fm(o.value)}</td><td class="r">${o.months_held}</td></tr>`).join('')}</table>`
@@ -864,12 +885,16 @@ async function tabLending(m) {
     <div class="panel" style="margin-top:12px">
       <h3>Large credits on the books</h3>
       ${d.large.length ? `<table><tr><th>Borrower</th><th>Product</th><th>Market</th>
-        <th class="r">Balance</th><th class="r">Rate</th><th>Tier</th><th>Status</th></tr>
+        <th class="r">Balance</th><th class="r">Rate</th><th>Tier</th><th>Status</th><th></th></tr>
         ${d.large.slice().reverse().map(l => `<tr>
           <td>${esc(l.name)}</td><td>${PRODUCT_LABELS[l.product] || l.product}</td>
           <td>${esc(l.market_name || l.market)}</td><td class="r">${fm(l.balance)}</td>
           <td class="r">${pct(l.rate)}</td><td>${l.tier}</td>
-          <td>${statusPill(l.status)}</td></tr>`).join('')}</table>`
+          <td>${statusPill(l.status)}</td>
+          <td>${(() => {
+            const sale = (d.loan_sales || []).find(s => s.kind === 'large' && s.loan_id === l.id);
+            return sale ? `<button class="small" onclick='confirmLoanSale(${jattr(sale)})'>Sell</button>` : '';
+          })()}</td></tr>`).join('')}</table>`
         : '<span class="sub">No individually-tracked large credits yet.</span>'}
     </div>`;
 }
@@ -877,6 +902,27 @@ async function tabLending(m) {
 function statusPill(s) {
   const map = { current: 'g', d30: 'y', d60: 'y', d90: 'r', npl: 'r' };
   return `<span class="pill ${map[s] || 'b'}">${esc(s.toUpperCase())}</span>`;
+}
+
+function confirmLoanSale(s) {
+  const html = `<div class="memoform">
+      <div class="who-name">${esc(s.label)}</div>
+      <div class="sub">${esc(s.buyer_name || '')} · ${esc(s.market_name || '')}</div>
+      <div class="memorow"><span class="k">Par sold</span><span class="v">${fm(s.par)}</span></div>
+      <div class="memorow"><span class="k">Price</span><span class="v">${fm(s.price)} (${(s.px_par * 100).toFixed(1)} cents)</span></div>
+      <div class="memorow"><span class="k">Gain / loss</span>
+        <span class="v ${cls(s.gain)}">${fm(s.gain)}</span></div>
+      <div class="memorow"><span class="k">Interest given up</span><span class="v">${fm(s.ni_year)}/yr</span></div>
+      <div class="memorow"><span class="k">Loans vs deposits after</span>
+        <span class="v">${((s.ldr_after || 0) * 100).toFixed(0)}%</span></div>
+      <p class="moved">${esc(s.owner)}</p>
+    </div>`;
+  const payload = {kind: s.kind, product: s.product, market: s.market,
+                   amount: s.par, loan_id: s.loan_id};
+  showHtml('Sell this book — ' + s.label, html, [
+    ['Sell to ' + (s.buyer_name || 'the buyer'),
+     `closeText();act('sell_loans',${jattr(payload)})`, 'primary'],
+  ]);
 }
 
 function showMemo(a) {
@@ -1041,7 +1087,36 @@ async function tabDeposits(m) {
         return `<tr><td>${esc(mk.name)}</td>${cells}<td class="r"><b>${fmc(tot)}</b></td></tr>`;
       }).join('')}
       </table>
+      ${townStancePanel(d)}
     </div>`;
+}
+function townStancePanel(d) {
+  const mids = Object.keys(d.pools || {});
+  if (mids.length < 2) return '';
+  const town = d.market_offsets_bp || {};
+  const rows = mids.map(mid => {
+    const mk = d.pools[mid];
+    const ov = town[mid] || {};
+    const mm = ov.money_market != null ? ov.money_market : '';
+    const cd = ov.cd_1y != null ? ov.cd_1y : '';
+    const pay = d.town_rates && d.town_rates[mid] ? pct(d.town_rates[mid].money_market) : '—';
+    return `<tr>
+      <td>${esc(mk.name)}</td>
+      <td class="r">${pay}</td>
+      <td class="r"><input type="number" step="5" min="-300" max="300" placeholder="franchise"
+        value="${mm}"
+        onchange="if(this.value==='')return;setPol('deposits.market_offsets_bp.${mid}.money_market', parseInt(this.value))"></td>
+      <td class="r"><input type="number" step="5" min="-300" max="300" placeholder="franchise"
+        value="${cd}"
+        onchange="if(this.value==='')return;setPol('deposits.market_offsets_bp.${mid}.cd_1y', parseInt(this.value))"></td>
+    </tr>`;
+  }).join('');
+  return `<h3 style="margin-top:14px">Town stance</h3>
+    <div class="helptip">Franchise offsets apply everywhere. A town box overrides money market or the 1-year CD in that market only — pay up in the Permian without re-pricing Caprock.</div>
+    <table><tr><th>Town</th><th class="r">You pay MM</th>
+      <th class="r">MM offset bp</th><th class="r">CD 1y offset bp</th></tr>
+      ${rows}
+    </table>`;
 }
 function sumAccounts(pools, p) {
   return Object.values(pools).reduce((a, mk) => a + mk.products[p].accounts, 0);
@@ -1081,6 +1156,7 @@ async function tabTreasury(m) {
       ${card(dt('liquidity'), pct(d.liquidity_ratio, 1))}
       ${s.tainted ? card('HTM STATUS', 'TAINTED', 'no more HTM purchases', 'neg') : ''}
     </div>
+    ${evePanel(d.eve)}
     <div class="grid g2">
     <div class="panel">
       <h3>Buy securities (at market yield off the live curve)</h3>
@@ -1129,7 +1205,10 @@ async function tabTreasury(m) {
         <span class="k">Shares outstanding</span><span class="v">${d.shares.toLocaleString()}</span>
         <span class="k">Tangible book value</span><span class="v">${fm(d.tbv)}</span>
         <span class="k">TBV per share</span><span class="v">${fm(Math.round(d.tbv / d.shares))}</span>
+        <span class="k">${d.listed ? 'Last print' : 'Implied private price'}</span>
+        <span class="v">${d.quote ? (fm(d.quote.px) + ' · ' + d.quote.price_to_book.toFixed(2) + '× book') : '—'}</span>
       </div>
+      ${listingBlock(d)}
       <div class="ctl" style="margin-top:8px"><label>Raise common $</label>
         <input type="number" id="cap-amt" value="2000000">
         <button class="small" onclick="confirmRaiseCommon()">Raise</button></div>
@@ -1162,6 +1241,27 @@ async function tabTreasury(m) {
             onclick="${l.cls === 'HTM' ? `if(confirm('Selling HTM taints the entire HTM book — every unrealized loss hits equity at once. Sure?'))` : ''}act('sell_security',{lot_id:${l.id}})">Sell</button></td></tr>`;
         }).join('')}</table>` : '<span class="sub">No securities. Cash is earning fed funds minus a dime.</span>'}
     </div>`;
+}
+
+function evePanel(eve) {
+  if (!eve) return '';
+  return `<div class="panel" style="margin-top:12px">
+    <h3>What a rate jump does to book value</h3>
+    <p class="stance">${esc(eve.owner)}</p>
+    <div class="kv">
+      <span class="k">Asset duration</span><span class="v">${eve.asset_duration}y</span>
+      <span class="k">Funding duration</span><span class="v">${eve.liability_duration}y</span>
+      <span class="k">Duration gap</span><span class="v">${eve.duration_gap}y</span>
+    </div>
+    <table><tr><th>Parallel shock</th><th class="r">Δ economic equity</th>
+      <th class="r">vs tangible book</th></tr>
+      ${(eve.shocks || []).map(s => `<tr>
+        <td>${s.bp > 0 ? '+' : ''}${s.bp} bp</td>
+        <td class="r ${cls(s.delta_eve)}">${fm(s.delta_eve)}</td>
+        <td class="r ${cls(s.delta_eve)}">${pct(s.pct_tbv, 1)}</td>
+      </tr>`).join('')}</table>
+    <div class="helptip">Same duration gap the examiners sketch. Pay-fixed swaps and caps damp a rising-rate hit. This is not a new exam grade — they still look at paper losses vs capital.</div>
+  </div>`;
 }
 
 /* ---------------- Operations ---------------- */
@@ -1262,6 +1362,7 @@ const VERDICT_TEXT = {
   lethal: 'This will dilute you below well-capitalized',
   stretch: 'Stretch — capital gets tight after the gather',
   safe: 'Safe for a bank your size',
+  locked: 'Locked — this market is a later weight class',
 };
 
 function branchOptions(d) {
@@ -1276,7 +1377,8 @@ function branchOptions(d) {
     if (!rows.length) return '';
     return `<optgroup label="${esc(KIND_LABELS[k] || k)}">${rows.map(([mid, mk]) => {
       const p = (d.previews || {})[mid] || {};
-      const tag = p.already ? ' — another office'
+      const tag = p.verdict === 'locked' ? ' — unlocks at ' + fmc(p.unlock_assets || 0)
+        : p.already ? ' — another office'
         : p.verdict === 'cannot_fund' ? ' — cannot fund'
         : p.verdict === 'lethal' ? ' — capital event'
         : p.verdict === 'stretch' ? ' — stretch' : '';
@@ -1325,7 +1427,9 @@ function marketGroups(d) {
         <th>Verdict</th><th></th></tr>
       ${rows.map(([mid, r]) => {
         const p = (d.previews || {})[mid] || {};
-        const verdict = r.my_branches
+        const verdict = !r.unlocked
+          ? ('Unlocks at ' + fmc(r.unlock_assets || 0) + ' of assets')
+          : r.my_branches
           ? 'Another office is allowed (diminishing gather).'
           : (VERDICT_TEXT[p.verdict] || p.verdict || '');
         return `<tr>
@@ -1356,7 +1460,7 @@ function openMarketPreview(mid) {
         <span class="v">${((p.proforma_leverage || 0) * 100).toFixed(1)}%</span></div>
       <p class="moved">${esc(vtxt)}</p>
     </div>`;
-  const btns = p.can_fund
+  const btns = (p.can_fund && p.verdict !== 'locked')
     ? [['Open this branch', `closeText();act('open_branch',{market:${JSON.stringify(mid)}})`,
         (p.verdict === 'lethal' || p.verdict === 'stretch') ? 'danger' : 'primary']]
     : [];
@@ -1386,7 +1490,33 @@ function confirmDigital() {
   if (ok) act('invest_digital');
 }
 
-async function confirmRaiseCommon() {
+function listingBlock(d) {
+  if (d.listed) {
+    return `<div class="helptip">Listed. Buybacks hit the last print. Private deals can take 40% in new stock.</div>`;
+  }
+  const p = d.listing;
+  if (typeof p === 'string') {
+    return `<div class="helptip">Listing: ${esc(p)}.</div>`;
+  }
+  if (p && p.can_list) {
+    return `<div class="ctl" style="margin-top:8px">
+      <button class="small" onclick="confirmListCommon()">List the common (${fm(p.fees)} fees · ${fm(p.px)}/sh)</button>
+    </div>`;
+  }
+  return '';
+}
+async function confirmListCommon() {
+  try {
+    const r = await api('/api/action', { action: 'preview_list_common', payload: {} });
+    const p = r.result || r;
+    if (p.error || p.message && !p.can_list) { toast(p.error || p.message, true); return; }
+    const ok = confirm('List the common stock? Fees ' + fm(p.fees)
+      + '. Opening print about ' + fm(p.px) + ' (' + (p.price_to_book || 0).toFixed(2)
+      + '× book). Buybacks and stock deals will use this price.');
+    if (ok) act('list_common', {});
+  } catch (e) { toast(String(e), true); }
+}
+function confirmRaiseCommon() {
   const amt = moneyIn('cap-amt');
   if (!amt) return;
   try {
@@ -1437,6 +1567,36 @@ function confirmOpenBranch(market, source) {
   ]);
 }
 
+function pipelineBanner(pipe) {
+  if (!pipe || !pipe.length) return '';
+  return pipe.map(item => {
+    const deal = item.deal || {};
+    const who = item.rival_name || 'A rival';
+    const mo = item.months_left == null ? '?' : item.months_left;
+    return `<div class="banner" style="margin-bottom:10px;border-color:var(--warn)">
+      <b>${esc(deal.name || 'A book')} is in diligence.</b>
+      ${esc(who)} is circling — about ${mo} month${mo === 1 ? '' : 's'} left.
+      <div class="btnrow" style="margin-top:6px">
+        <button class="small primary" onclick="act('close_pipeline',{pipeline_id:${item.id}})">Buy it</button>
+        <button class="small" onclick="act('drop_pipeline',{pipeline_id:${item.id}})">Pass</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function mraBanner(d) {
+  const live = (d.mras || []).filter(m => m.status === 'open' || m.status === 'missed');
+  if (!live.length) return '';
+  return `<div class="banner" style="border-color:var(--warn)">
+    <b>Matters requiring attention</b>
+    ${live.map(m => {
+      const line = MODE === 'owner' ? (m.owner || m.text) : m.text;
+      const tag = m.status === 'missed' ? 'MISSED — ' : '';
+      return `<div class="sub">${tag}${esc(line)}</div>`;
+    }).join('')}
+  </div>`;
+}
+
 /* ---------------- Risk & Reg ---------------- */
 async function tabRisk(m) {
   const d = await section('risk');
@@ -1460,6 +1620,7 @@ async function tabRisk(m) {
       <b>${esc(d.exam_path.needed || '')}</b>
       ${(d.exam_path.actions || []).map(a => `<div class="sub">${esc(a)}</div>`).join('')}
     </div>` : ''}
+    ${mraBanner(d)}
     ${d.thresholds.durbin ? '<div class="sub">Regulatory tier: ' +
       ['$10B+ (Durbin/CFPB)', d.thresholds.enhanced ? '$50B+ (stress tests)' : '',
        d.thresholds.lcr ? '$100B+ (LCR)' : '', d.thresholds.gsib ? 'G-SIB' : '']
@@ -1476,6 +1637,7 @@ async function tabRisk(m) {
           ${pct(-(Math.min(0, d.aoci) + Math.min(0, d.htm_unrealized)) / Math.max(1, c.cet1), 0)}</span>
       </div>
       <div class="helptip">${durationTrapCopy()}</div>
+      ${d.eve ? `<div class="sub" style="margin-top:6px">${esc(d.eve.owner)} Open Treasury for the ±100/200/300 bp table.</div>` : ''}
       <h3>Liquidity & funding</h3>
       <div class="kv">
         <span class="k">Liquid assets / assets</span><span class="v">${pct(d.liquidity_ratio, 1)}</span>
@@ -1919,11 +2081,14 @@ function renderEventModal() {
     const pf = (ev.deal && ev.deal.proforma) || {};
     const blocked = pf.can_buy === false;
     const why = (pf.blockers || []).join('; ');
+    const listed = !!(SUM.treasury && SUM.treasury.listed) || !!(ev.choices || []).includes('buy_stock');
     controls = `<div class="btnrow">
       <button class="primary" ${blocked ? 'disabled title="' + esc(why) + '"' : ''}
-        onclick="eventChoice(${ev.id}, 'buy')">${blocked ? 'Cannot close' : 'Buy it'}</button>
+        onclick="eventChoice(${ev.id}, 'buy')">${blocked ? 'Cannot close' : 'Buy it (cash)'}</button>
+      ${listed && !blocked ? `<button onclick="eventChoice(${ev.id}, 'buy_stock')">Buy 60% cash / 40% stock</button>` : ''}
+      <button onclick="eventChoice(${ev.id}, 'hold')">Hold in diligence</button>
       <button onclick="eventChoice(${ev.id}, 'pass')">Pass</button></div>
-      ${blocked ? `<div class="helptip">${esc(why)}</div>` : ''}`;
+      ${blocked ? `<div class="helptip">${esc(why)} Hold parks the book so you can raise; a rival may close it.</div>` : ''}`;
   } else if (ev.type === 'exam') {
     const comp = ev.composite || 3;
     const owner = MODE === 'owner' && ev.owner_title;

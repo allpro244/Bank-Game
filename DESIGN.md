@@ -146,10 +146,10 @@ These are queued as **Phase H** in `ROADMAP.md` and wait until the
 unfair-death and first-session work (Phases A–E) is shipped. Do not
 start them to avoid finishing A.
 
-- Per-market deposit pricing (offsets by market, promo money).
-- Loan sales/participations and a securitization shelf.
-- Competitor M&A against the player's targets; hostile offers.
-- Examiner remediation tracks (MRAs with deadlines).
-- Duration-matched EVE dashboard with +/-100/200/300bp shocks.
+- Per-market deposit pricing (offsets by market, promo money). **Shipped.**
+- Loan sales/participations and a securitization shelf. **Seasoned sale shipped** (performing strip or named credit → living rival, preview required). No purchase tape. Shelf still parked.
+- Competitor M&A against the player's targets; hostile offers. **Shipped** (hold / pass / 3-month steal).
+- Examiner remediation tracks (MRAs with deadlines). **Shipped.**
+- Duration-matched EVE dashboard with +/-100/200/300bp shocks. **Shipped.**
 - Named key employees (a CFO, a chief credit officer) with traits.
 - Holding-company structure with double leverage.

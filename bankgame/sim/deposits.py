@@ -55,6 +55,8 @@ def default_config(econ):
             "safe_deposit_annual": 4500,
         },
         "promo_cd_bonus": 0.0,     # extra rate on all CDs (promo lever)
+        # Optional per-town override of offsets_bp. Missing product = franchise default.
+        "market_offsets_bp": {},
         "pools": {},               # market -> product -> {balance, accounts, wavg_rate, accrued}
     }
 
@@ -86,13 +88,25 @@ def totals(bank_deps):
     return out
 
 
-def effective_rate(state, product):
+def offset_bp(state, product, market_id=None):
+    """Franchise offset, or a town override when one is set."""
+    deps = state["bank"]["deposits"]
+    base = int(deps["offsets_bp"].get(product, 0) or 0)
+    if not market_id:
+        return base
+    town = (deps.get("market_offsets_bp") or {}).get(market_id) or {}
+    if product in town and town[product] is not None:
+        return int(town[product])
+    return base
+
+
+def effective_rate(state, product, market_id=None):
     """The rate you are actually paying: market rate + your offset."""
     if product == "checking":
         return 0.0
     deps = state["bank"]["deposits"]
     nat = C.national_deposit_rates(state["economy"])
-    r = nat.get(product, nat["savings"]) + deps["offsets_bp"].get(product, 0) / 10000.0
+    r = nat.get(product, nat["savings"]) + offset_bp(state, product, market_id) / 10000.0
     if product.startswith("cd_"):
         r += deps.get("promo_cd_bonus", 0.0)
     return max(0.0, round(r, 5))
@@ -280,12 +294,12 @@ def step_day(state, days):
     bank = state["bank"]
     deps = bank["deposits"]
     total_accrual = 0
-    for mkt in deps["pools"].values():
+    for market_id, mkt in deps["pools"].items():
         for p in PRODUCTS:
             pool = mkt[p]
             if pool["balance"] <= 0:
                 continue
-            rate = pool["wavg_rate"] if p.startswith("cd_") else effective_rate(state, p)
+            rate = pool["wavg_rate"] if p.startswith("cd_") else effective_rate(state, p, market_id)
             if rate <= 0:
                 continue
             a = int(round(pool["balance"] * rate * days / 365.0))
@@ -346,7 +360,7 @@ def step_month(state, rng):
         pools = deps["pools"][market_id]
         for p in PRODUCTS:
             pool = pools[p]
-            my_rate = effective_rate(state, p)
+            my_rate = effective_rate(state, p, market_id)
             mkt_rate = mrates.get(p, mrates.get("savings", 0.01))
             edge_100bp = (my_rate - mkt_rate) / 0.01
             price_mult = 2.718281828 ** (SENS[p] * edge_100bp)
@@ -516,12 +530,12 @@ def cost_of_deposits(state):
     deps = state["bank"]["deposits"]
     tot = 0
     wsum = 0.0
-    for mkt in deps["pools"].values():
+    for market_id, mkt in deps["pools"].items():
         for p in PRODUCTS:
             b = mkt[p]["balance"]
             if b <= 0:
                 continue
-            r = mkt[p]["wavg_rate"] if p.startswith("cd_") else effective_rate(state, p)
+            r = mkt[p]["wavg_rate"] if p.startswith("cd_") else effective_rate(state, p, market_id)
             tot += b
             wsum += b * r
     return (wsum / tot) if tot else 0.0

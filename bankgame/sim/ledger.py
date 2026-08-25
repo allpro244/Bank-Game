@@ -60,6 +60,7 @@ CHART = {
     "4140": ("Gains on securities sold", "I"),
     "4150": ("Other noninterest income", "I"),
     "4160": ("Mortgage banking income", "I"),
+    "4165": ("Gains on loans sold", "I"),
     "4170": ("Investment banking and capital markets", "I"),
     # Expense
     "5000": ("Interest on deposits", "X"),
@@ -74,6 +75,7 @@ CHART = {
     "5160": ("Fraud and operational losses", "X"),
     "5170": ("Other operating expense", "X"),
     "5180": ("Losses on securities sold", "X"),
+    "5185": ("Losses on loans sold", "X"),
     "5190": ("Income tax expense", "X"),
     "5200": ("Regulatory fines and penalties", "X"),
     "5210": ("OREO and collection expense", "X"),
@@ -195,7 +197,7 @@ def close_month(ledger, month_label, date):
     for code, (_, t) in CHART.items():
         if t not in ("I", "X"):
             continue
-        bal = ledger["balances"][code]
+        bal = ledger["balances"].setdefault(code, 0)
         if bal == 0:
             pl[code] = 0
             continue

@@ -242,6 +242,7 @@ def pay_accrued_monthly(state):
 
 def step_month(state, rng):
     """Maturities roll off; sweep excess cash to fed funds sold."""
+    mark_share_price(state)
     bank = state["bank"]
     f = bank["funding"]
     date = state["time"]["date"]
@@ -436,7 +437,11 @@ def common_raise_terms(state, amount):
     floor = 1.0 if cam <= 2 else 0.85 if cam == 3 else 0.70
     price_to_book = max(floor, min(2.2, raw))
     shares_out = max(1, bank["shares"])
-    px = max(1, int(tbv / shares_out * price_to_book))
+    if bank.get("listed") and bank.get("share_px"):
+        px = max(1, int(bank["share_px"] * 0.95))
+        price_to_book = max(0.40, min(2.4, px / max(1, tbv / shares_out)))
+    else:
+        px = max(1, int(tbv / shares_out * price_to_book))
     new_shares = amount // px
     fees = int(amount * 0.05)
     if fees >= max(1, equity):
@@ -505,6 +510,88 @@ def issue_preferred(state, amount):
     return {"rate": rate}
 
 
+def share_quote(state):
+    """Last print (listed) or the implied private multiple. Cents per share."""
+    bank = state["bank"]
+    equity = L.total_equity(bank["ledger"])
+    tbv = max(1, equity - bank["ledger"]["balances"]["1600"])
+    shares = max(1, bank["shares"])
+    tbv_ps = max(1, tbv // shares)
+    if bank.get("listed") and bank.get("share_px"):
+        px = max(1, int(bank["share_px"]))
+    else:
+        terms = common_raise_terms(state, max(500_000_00, int(tbv * 0.10)))
+        ptb = terms["price_to_book"] if isinstance(terms, dict) else 1.0
+        px = max(1, int(tbv_ps * ptb))
+    return {
+        "px": px, "tbv_ps": tbv_ps,
+        "price_to_book": round(px / tbv_ps, 2),
+        "listed": bool(bank.get("listed")),
+        "shares": shares, "tbv": tbv,
+    }
+
+
+LIST_MIN_ASSETS = 500_000_000_00
+LIST_FEE_FLOOR = 2_000_000_00
+
+
+def listing_preview(state):
+    """What going public would cost. Dict or a refusal string."""
+    bank = state["bank"]
+    if bank.get("listed"):
+        return "already listed"
+    assets = max(0, bank.get("cached_assets") or 0)
+    if assets < LIST_MIN_ASSETS:
+        return "listing is a regional event — about $500 million of assets"
+    if state["regulation"]["camels"]["composite"] > 2:
+        return "the exchange will not list a 3-or-worse report card"
+    if state["regulation"]["pca"] != "well":
+        return "listing requires well-capitalized status"
+    m = state["metrics"][-1] if state.get("metrics") else {}
+    if not m.get("earnings_ready"):
+        return "need a year of reported earnings first"
+    q = share_quote(state)
+    fees = max(LIST_FEE_FLOOR, int(q["tbv"] * 0.015))
+    return {
+        "fees": fees, "px": q["px"], "price_to_book": q["price_to_book"],
+        "shares": q["shares"], "can_list": True,
+    }
+
+
+def list_common(state):
+    prev = listing_preview(state)
+    if isinstance(prev, str):
+        return prev
+    fees = prev["fees"]
+    if ensure_cash(state, fees) < fees:
+        return "not enough cash for listing fees ($%s)" % f"{fees // 100:,}"
+    bank = state["bank"]
+    L.post(bank["ledger"], state["time"]["date"],
+           "Common stock listed (exchange fees)",
+           [["5170", fees, 0], ["1000", 0, fees]], tag="cap")
+    bank["listed"] = True
+    bank["listed_month"] = state["economy"]["months"]
+    bank["share_px"] = prev["px"]
+    return {"px": prev["px"], "fees": fees,
+            "price_to_book": prev["price_to_book"]}
+
+
+def mark_share_price(state):
+    """Monthly: listed print drifts toward the through-cycle multiple."""
+    bank = state["bank"]
+    if not bank.get("listed"):
+        return
+    q = share_quote(state)
+    # Target uses the private formula (health, ROE, CAMELS), not the last print.
+    saved = bank.get("share_px")
+    bank["share_px"] = None
+    target = share_quote(state)["px"]
+    bank["share_px"] = saved
+    cur = max(1, int(saved or target))
+    bank["share_px"] = max(1, int(cur + 0.25 * (target - cur)))
+    return bank["share_px"]
+
+
 def buyback(state, amount):
     bank = state["bank"]
     reg = state["regulation"]
@@ -515,15 +602,15 @@ def buyback(state, amount):
     cash = ensure_cash(state, amount)
     if amount > cash:
         return "not enough cash"
-    equity = L.total_equity(bank["ledger"])
-    tbv = max(1, equity - bank["ledger"]["balances"]["1600"])
-    px = max(1, int(tbv / bank["shares"] * 1.1))
+    q = share_quote(state)
+    px = max(1, q["px"])
     shares = min(bank["shares"] // 5, amount // px)
     if shares <= 0:
         return "amount too small"
     spend = shares * px
     L.post(bank["ledger"], state["time"]["date"],
-           "Share buyback (%s shares)" % f"{shares:,}",
+           "Share buyback (%s shares at $%s)" % (
+               f"{shares:,}", f"{px // 100:,}"),
            [["3000", spend, 0], ["1000", 0, spend]], tag="cap")
     bank["shares"] -= shares
     return {"shares_bought": shares, "price": px}

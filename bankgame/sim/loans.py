@@ -331,7 +331,33 @@ def macro_pd_mult(state, product, market_id):
             m *= 1.0 + shock["sev"] * 2.2
     if region["mix"].get("oil", 0) > 0.15 and econ["oil"] < 42:
         m *= 1.0 + region["mix"]["oil"] * (42 - econ["oil"]) / 42 * 4.0
+        if econ["oil"] < 35 and product in ("ci", "cre", "construction"):
+            m *= 1.15
+    shock = region.get("shock")
+    if shock and shock["id"] == "hurricane" and product in (
+            "cre", "construction", "mortgage"):
+        m *= 1.0 + shock["sev"] * 1.8
+    # Austin-style tech book: equity drawdown hits C&I / CRE you booked there.
+    tech = region["mix"].get("tech", 0)
+    peak = max(200.0, econ.get("equity_peak") or econ.get("equity_index") or 200.0)
+    eq = econ.get("equity_index") or peak
+    if tech >= 0.25 and eq < peak * 0.82 and product in ("ci", "cre"):
+        m *= 1.0 + tech * (1.0 - eq / peak) * 2.4
     return min(9.0, m)
+
+
+def vintage_stress_mult(quality, credit_stress):
+    """Loose vintages amplify a bust; tight vintages dampen it.
+
+    Calm books (stress < 0.20) are unchanged so the 3-year sit-still
+    band does not move. Cowboy CRE from 2004 and fortress CRE from
+    the same year must get different autopsies.
+    """
+    stress = float(credit_stress or 0.0)
+    if stress < 0.20:
+        return 1.0
+    looseness = float(quality or 1.0) - 1.0
+    return max(0.55, min(2.4, 1.0 + looseness * stress * 2.2))
 
 
 def franchise_origination_scale(state):
@@ -871,7 +897,8 @@ def step_month_credit(state, rng):
 
         # ---- delinquency rolls ----
         pdm = (BASE_PD[p["product"]] / 12.0) * TIER_PD_MULT[p["tier"]] * p["quality"] \
-            * macro_pd_mult(state, p["product"], p["market"]) * _seasoning(p)
+            * macro_pd_mult(state, p["product"], p["market"]) * _seasoning(p) \
+            * vintage_stress_mult(p["quality"], state["economy"].get("credit_stress"))
         pdm = min(0.20, pdm)
         c = max(0.0, 1.0 - p["d30"] - p["d60"] - p["d90"] - p["npl"])
         new30 = c * pdm * 3.2          # entry into 30dpd is several x the pd
@@ -1095,7 +1122,8 @@ def quarterly_cecl(state):
             continue
         life_years = min((TERM_M[p["product"]] or 36) / 12.0, 5.0) * 0.6
         el = (BASE_PD[p["product"]] * TIER_PD_MULT[p["tier"]] * p["quality"]
-              * LGD[p["product"]] * life_years * forecast)
+              * LGD[p["product"]] * life_years * forecast
+              * vintage_stress_mult(p["quality"], econ.get("credit_stress")))
         # delinquency-adjusted: troubled buckets carry specific reserves
         specific = (p["d30"] * 0.10 + p["d60"] * 0.25 + p["d90"] * 0.45
                     + p["npl"] * LGD[p["product"]])
@@ -1119,6 +1147,281 @@ def quarterly_cecl(state):
             L.post(bank["ledger"], date, "Release of credit reserves (CECL)",
                    [["1350", release, 0], ["5150", 0, release]], tag="credit")
     return required
+
+
+# Seasoned whole-loan sales. Origination already has participate + the
+# mortgage slider. This is the missing half: dump a book you already own.
+
+MIN_SEASONED_SALE = 250_000_00
+
+
+def _remaining_years(product, age_m=0, term_m=None):
+    term = int(term_m if term_m else TERM_M.get(product, 60) or 60)
+    left_m = max(6, term - int(age_m or 0))
+    if product in FLOATING or product == "credit_card":
+        return 0.35
+    if product == "mortgage":
+        return min(7.0, left_m / 12.0 * 0.55)
+    return min(6.0, left_m / 12.0 * 0.50)
+
+
+def _sale_px(product, book_rate, mkt_rate, years, quality=1.0, tier="B"):
+    edge = (book_rate or 0.0) - (mkt_rate or 0.0)
+    px = 1.0 + edge * years * 0.65
+    if quality < 0.95:
+        px -= 0.012
+    if tier == "C":
+        px -= 0.018
+    elif tier == "A":
+        px += 0.004
+    px -= 0.003   # bid-ask
+    return round(max(0.90, min(1.025, px)), 4)
+
+
+def loan_buyer(state, market, par):
+    """Living rival who can book the strip. Prefer in-town, then roll-up."""
+    from . import competitors as COMP
+    need = max(int(par) * 2, 40_000_000_00)
+    cands = [b for b in COMP.living_banks(state["competitors"])
+             if b["assets"] >= need]
+    if not cands:
+        cands = [b for b in COMP.living_banks(state["competitors"])
+                 if b["assets"] >= int(par) * 1.5]
+    if not cands:
+        return None
+
+    def score(b):
+        s = 0.0
+        if market and market in (b.get("markets") or []):
+            s += 4.0
+        if b.get("strategy") == "roll_up":
+            s += 3.0
+        s += min(4.0, b["assets"] / max(1, need))
+        return s
+
+    return max(cands, key=score)
+
+
+def _pool_strip(state, product, market):
+    """Performing dollars in one product × town, across vintages."""
+    cfg = state["bank"]["loans"]
+    pools = [p for p in cfg["pools"]
+             if p["product"] == product and p["market"] == market
+             and p["balance"] > 0]
+    perf = 0
+    npl_amt = 0
+    rate_w = 0.0
+    qual_w = 0.0
+    age_w = 0.0
+    worst = "A"
+    for p in pools:
+        npl_amt += int(p["balance"] * p.get("npl", 0.0))
+        clean = p["balance"] - int(p["balance"] * p.get("npl", 0.0))
+        if clean <= 0:
+            continue
+        perf += clean
+        rate_w += clean * p["rate"]
+        qual_w += clean * p.get("quality", 1.0)
+        age_w += clean * p.get("age_m", 0)
+        if p.get("tier") == "C":
+            worst = "C"
+        elif p.get("tier") == "B" and worst == "A":
+            worst = "B"
+    if perf <= 0:
+        return None
+    return {
+        "pools": pools, "performing": perf, "npl": npl_amt,
+        "rate": rate_w / perf, "quality": qual_w / perf,
+        "age_m": age_w / perf, "tier": worst,
+    }
+
+
+def sellable_strips(state):
+    """What the Lending tab can offer. Preview only — no mutation."""
+    cfg = state["bank"]["loans"]
+    seen = set()
+    out = []
+    for p in cfg["pools"]:
+        key = (p["product"], p["market"])
+        if key in seen or p["balance"] <= 0:
+            continue
+        seen.add(key)
+        strip = _pool_strip(state, p["product"], p["market"])
+        if not strip or strip["performing"] < MIN_SEASONED_SALE:
+            continue
+        amt = (strip["performing"] // 2 // 50_000_00) * 50_000_00
+        amt = max(MIN_SEASONED_SALE, min(strip["performing"], amt))
+        prev = preview_loan_sale(state, "pool", product=p["product"],
+                                 market=p["market"], amount=amt)
+        if isinstance(prev, dict):
+            out.append(prev)
+    for l in cfg["large"]:
+        if l.get("status") != "current" or int(l.get("balance") or 0) < MIN_SEASONED_SALE:
+            continue
+        prev = preview_loan_sale(state, "large", loan_id=l["id"])
+        if isinstance(prev, dict):
+            out.append(prev)
+    out.sort(key=lambda x: -x["par"])
+    return out[:12]
+
+
+def preview_loan_sale(state, kind, product=None, market=None,
+                      amount=None, loan_id=None):
+    """Price a seasoned sale. Does not touch the books."""
+    from . import regulation as REG
+    from . import ledger as LL
+    kind = str(kind or "")
+    if kind == "large":
+        rec = next((l for l in state["bank"]["loans"]["large"]
+                    if l.get("id") == loan_id), None)
+        if rec is None:
+            return "that credit is not on the books"
+        if rec.get("status") != "current":
+            return "only a current credit can be sold — work the criticized one"
+        par = int(rec["balance"])
+        if par < MIN_SEASONED_SALE:
+            return "minimum sale is $250,000"
+        product = rec["product"]
+        market = rec["market"]
+        book_rate = rec["rate"]
+        years = _remaining_years(product, rec.get("age_m", 0), rec.get("term_m"))
+        quality = 1.15 if rec.get("tier") == "A" else 0.85 if rec.get("tier") == "C" else 1.0
+        tier = rec.get("tier") or "B"
+        label = rec.get("name") or "Large credit"
+    elif kind == "pool":
+        strip = _pool_strip(state, product, market)
+        if not strip:
+            return "no performing balance in that book"
+        want = strip["performing"] if amount is None else int(amount)
+        par = max(0, min(strip["performing"], want))
+        if par < MIN_SEASONED_SALE:
+            return "minimum sale is $250,000 of performing loans"
+        book_rate = strip["rate"]
+        years = _remaining_years(product, strip["age_m"])
+        quality = strip["quality"]
+        tier = strip["tier"]
+        town = state["regions"].get(market, {}).get("name", market)
+        label = "%s %s" % (town, product.replace("_", " "))
+    else:
+        return "sell a pool or a named credit"
+    mkt = C.market_rates(state, market or "caprock")["loan"].get(product, book_rate)
+    px = _sale_px(product, book_rate, mkt, years, quality, tier)
+    proceeds = int(par * px)
+    gain = proceeds - par
+    buyer = loan_buyer(state, market, par)
+    if buyer is None:
+        return "no living rival can book a strip that size"
+    r = REG.capital_ratios(state)
+    led = state["bank"]["ledger"]
+    liquid = (led["balances"]["1000"] + led["balances"]["1010"]
+              + led["balances"]["1100"])
+    loans0 = total_loans(state["bank"]["loans"])
+    deps = max(1, LL.total_deposits(led))
+    assets = max(1, r["assets"])
+    ni_yr = int(par * book_rate)
+    town = state["regions"].get(market, {}).get("name", market or "")
+    owner = (
+        "Sell %s of %s to %s at %.1f cents. Cash in %s. You give up about "
+        "%s a year of interest. Loans-to-deposits falls to %.0f%%."
+        % (_fm_cents(par), label, buyer["name"], px * 100, _fm_cents(proceeds),
+           _fm_cents(ni_yr), (loans0 - par) / deps * 100))
+    return {
+        "kind": kind, "label": label, "product": product, "market": market,
+        "market_name": town, "loan_id": loan_id, "par": par,
+        "amount": par, "price": proceeds, "px_par": px, "gain": gain,
+        "buyer_id": buyer["id"], "buyer_name": buyer["name"],
+        "rate": round(book_rate, 5), "ni_year": ni_yr,
+        "ldr_after": round((loans0 - par) / deps, 4),
+        "liq_after": round((liquid + proceeds) / (assets + gain), 4),
+        "cet1_after": round((r["cet1"] + gain) / max(1, r["rwa"] - par), 5),
+        "can_sell": True, "blockers": [], "owner": owner,
+    }
+
+
+def _fm_cents(cents):
+    return "$%s" % f"{int(cents) // 100:,}"
+
+
+def _take_from_pools(pools, par):
+    """Pull `par` performing dollars, worst quality first. Leave NPL in place."""
+    ranked = sorted(pools, key=lambda p: (p.get("quality", 1.0), -p["balance"]))
+    left = par
+    for p in ranked:
+        if left <= 0:
+            break
+        npl_amt = int(p["balance"] * p.get("npl", 0.0))
+        d30_amt = int(p["balance"] * p.get("d30", 0.0))
+        d60_amt = int(p["balance"] * p.get("d60", 0.0))
+        d90_amt = int(p["balance"] * p.get("d90", 0.0))
+        clean = p["balance"] - npl_amt
+        take = min(left, max(0, clean))
+        if take <= 0:
+            continue
+        p["balance"] -= take
+        left -= take
+        if p["balance"] > 0:
+            p["npl"] = npl_amt / p["balance"]
+            p["d30"] = d30_amt / p["balance"]
+            p["d60"] = d60_amt / p["balance"]
+            p["d90"] = d90_amt / p["balance"]
+        else:
+            p["npl"] = p["d30"] = p["d60"] = p["d90"] = 0.0
+    return par - left
+
+
+def sell_loans(state, kind, product=None, market=None,
+               amount=None, loan_id=None):
+    """Commit a previewed seasoned sale. Buyer is a living rival."""
+    from . import competitors as COMP
+    prev = preview_loan_sale(state, kind, product=product, market=market,
+                             amount=amount, loan_id=loan_id)
+    if isinstance(prev, str):
+        return prev
+    par = prev["par"]
+    proceeds = prev["price"]
+    gain = prev["gain"]
+    bank = state["bank"]
+    led = bank["ledger"]
+    led["balances"].setdefault("4165", 0)
+    led["balances"].setdefault("5185", 0)
+    if kind == "large":
+        rec = next((l for l in bank["loans"]["large"]
+                    if l.get("id") == loan_id and l.get("status") == "current"), None)
+        if rec is None or rec["balance"] < par:
+            return "that credit is no longer current"
+        rec["balance"] = 0
+        rec["status"] = "sold"
+    else:
+        strip = _pool_strip(state, prev["product"], prev["market"])
+        if not strip or strip["performing"] < par:
+            return "the book shrank — preview again"
+        taken = _take_from_pools(strip["pools"], par)
+        if taken < par:
+            return "could not lift a clean performing strip that size"
+    lines = [["1000", proceeds, 0], ["1300", 0, par]]
+    if gain > 0:
+        lines.append(["4165", 0, gain])
+    elif gain < 0:
+        lines.append(["5185", -gain, 0])
+    L.post(led, state["time"]["date"],
+           "Whole-loan sale: %s to %s" % (prev["label"], prev["buyer_name"]),
+           lines, tag="loan")
+    rival = COMP.find_rival(state, prev["buyer_id"]) or \
+        loan_buyer(state, prev["market"], par)
+    if rival:
+        take = int(par * 0.90)
+        w_a = max(1, rival["assets"])
+        rival["assets"] += take
+        mid = prev.get("market")
+        if mid and mid not in (rival.get("markets") or []):
+            rival["markets"].append(mid)
+    cfg = bank["loans"]
+    cfg["stats"]["seasoned_sold"] = cfg["stats"].get("seasoned_sold", 0) + par
+    return {
+        "par": par, "price": proceeds, "gain": gain,
+        "buyer_name": prev["buyer_name"],
+        "message": prev["owner"],
+    }
 
 
 def portfolio_stats(state):

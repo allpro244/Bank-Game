@@ -632,6 +632,31 @@ def _r_hoarding(state):
         [_set("Raise dividend payout to 50%", "policies.dividend_payout", 50)])
 
 
+def _r_sell_seasoned(state):
+    """LDR or cash is tight — sell a book you already own. Never auto-sell."""
+    if not state["metrics"] or not state["metrics"][-1].get("earnings_ready"):
+        return None
+    m = state["metrics"][-1]
+    lr, _ = REG.liquidity_ratio(state)
+    if m.get("loan_to_deposit", 0) < 1.02 and lr >= 0.09:
+        return None
+    strips = LN.sellable_strips(state)
+    if not strips:
+        return None
+    prev = strips[0]
+    return _card(
+        "sell_seasoned", 1, "Sell a book you already own",
+        prev["owner"],
+        "New mortgages can still go to the agencies. This card is the "
+        "other half: a vintage already on the books, sold to a living "
+        "rival, with a mark. It does not buy anyone else's loans.",
+        "lending",
+        [_act("Sell %s" % prev["label"], "sell_loans",
+              {"kind": prev["kind"], "product": prev.get("product"),
+               "market": prev.get("market"), "amount": prev["par"],
+               "loan_id": prev.get("loan_id")})])
+
+
 def _r_sell_mortgages(state):
     m = state["metrics"][-1] if state["metrics"] else None
     if m is None or m.get("loan_to_deposit", 0) < 0.98:
@@ -807,6 +832,170 @@ def _r_second_county(state):
     return None
 
 
+def _r_market_leak(state):
+    """One town is paying the franchise rate and losing hot money."""
+    if not state["metrics"] or not state["metrics"][-1].get("earnings_ready"):
+        return None
+    served = [mid for mid in state["bank"]["deposits"]["pools"]
+              if DEP.office_count(state, mid) > 0]
+    if len(served) < 2:
+        return None
+    worst = None
+    for mid in served:
+        bal = state["bank"]["deposits"]["pools"][mid]["money_market"]["balance"]
+        if bal < 400_000_00:
+            continue
+        mine = DEP.effective_rate(state, "money_market", mid)
+        mkt = C.market_rates(state, mid)["deposit"].get("money_market", mine)
+        lag = mkt - mine
+        if lag < 0.0025:
+            continue
+        town = (state["bank"]["deposits"].get("market_offsets_bp") or {}).get(mid) or {}
+        if town.get("money_market") is not None:
+            continue
+        if worst is None or lag > worst[0]:
+            worst = (lag, mid, bal)
+    if worst is None:
+        return None
+    lag, mid, bal = worst
+    franchise = state["bank"]["deposits"]["offsets_bp"].get("money_market", 0)
+    bump = min(300, franchise + 25)
+    name = state["regions"][mid]["name"]
+    return _card(
+        "market_leak", 1, "%s is leaking hot money" % name,
+        "%s is %.0fbp behind the local money-market. That town's balances "
+        "are %s. Raise the %s money-market offset to %+dbp — the rest of "
+        "the franchise stays at %+dbp."
+        % (name, lag * 10000, _fm(bal), name, bump, franchise),
+        "Deposit beta is local. Paying up in the Permian should not reprice "
+        "Caprock checking. Town offsets sit on top of the franchise stance.",
+        "deposits",
+        [_set("Pay up in %s (+%dbp MM)" % (name, bump),
+              "deposits.market_offsets_bp.%s.money_market" % mid, bump)])
+
+
+def recommended_max_hold(state):
+    """Legal-lending-limit-ish hold for a book this size. Advisor only."""
+    assets = state["bank"].get("cached_assets") or 0
+    if assets <= 0:
+        assets = L.total_assets(state["bank"]["ledger"])
+    cet1 = REG.capital_ratios(state)["cet1"]
+    raw = max(int(assets * 0.04), int(cet1 * 0.15), 5_000_000_00)
+    raw = min(50_000_000_00, raw)
+    return max(5_000_000_00, (raw // 1_000_000_00) * 1_000_000_00)
+
+
+def _r_credit_box_scale(state):
+    """Seed-11 finding: a $2M hold on a grown book wakes Play until forever.
+    Recommend a raise. Never write the box or enable it."""
+    if not state["metrics"] or not state["metrics"][-1].get("earnings_ready"):
+        return None
+    assets = state["bank"].get("cached_assets") or 0
+    if assets < 80_000_000_00:
+        return None
+    hold = int(LN.credit_box(state).get("max_hold") or 2_000_000_00)
+    rec = recommended_max_hold(state)
+    if hold >= rec * 0.45 and hold > 2_500_000_00:
+        return None
+    return _card(
+        "credit_box_scale", 0, "Your credit box is still a community hold",
+        "The book is %s and the box still stops the clock on anything over %s. "
+        "Raise the hold to %s — about 4%% of assets or 15%% of capital, the "
+        "size a bank this large actually keeps. This card does not turn the "
+        "box on or approve a credit."
+        % (_fm(assets), _fm(hold), _fm(rec)),
+        "Play until is a clock. A $2M hold on an $80M book is why the desk "
+        "wakes you ten thousand times. You write the box; the advisor does not.",
+        "lending",
+        [_set("Raise hold to %s" % _fm(rec),
+              "loans.credit_box.max_hold", rec)])
+
+
+def _r_mra_due(state):
+    REG.ensure(state)
+    live = REG.live_mras(state["regulation"])
+    if not live:
+        return None
+    missed = [m for m in live if m["status"] == "missed"]
+    if not missed and state["regulation"]["months_to_exam"] > 4:
+        return None
+    sev = 2 if missed else 1
+    title = ("You missed an examiner deadline" if missed else
+             "Examiner items due in ~%d months"
+             % max(1, state["regulation"]["months_to_exam"]))
+    body = " ".join(m.get("owner") or m.get("text") or "" for m in live[:2])
+    return _card(
+        "mra_due", sev, title, body,
+        "A matter requiring attention is a measurable item with a deadline. "
+        "Miss it and Management takes a +1 next visit. Meet it and it goes "
+        "away. An MOU is not an MRA.",
+        "risk",
+        [_goto("Open Risk & Reg", "risk")])
+
+
+def _r_pipeline_deal(state):
+    """A book in diligence — close before the circling rival does."""
+    pipe = state.get("ma_pipeline") or []
+    if not pipe:
+        return None
+    item = pipe[0]
+    deal = item.get("deal") or {}
+    pf = engine_deal_proforma(state, deal)
+    who = item.get("rival_name") or "a rival"
+    months = max(1, int(item.get("months_left") or 1))
+    town = state["regions"].get(deal.get("market"), {}).get("name", "")
+    if pf.get("can_buy"):
+        return _card(
+            "pipeline_deal", 1, "%s is still for sale — %s is circling"
+            % (deal.get("name") or "The target", who),
+            "%s%s is in diligence. About %d month%s left. Close it from "
+            "the desk or they take the franchise."
+            % (deal.get("name") or "The book",
+               (" in %s" % town) if town else "",
+               months, "" if months == 1 else "s"),
+            "Holding is a bet the seller waits. Pass and a roll-up often "
+            "closes the same week. This card does not buy the bank.",
+            "desk",
+            [_act("Buy %s" % (deal.get("name") or "the bank"),
+                  "close_pipeline", {"pipeline_id": item["id"]})])
+    why = "; ".join(pf.get("blockers") or []) or "you cannot close today"
+    return _card(
+        "pipeline_deal", 1, "%s is still for sale — you cannot close yet"
+        % (deal.get("name") or "The target"),
+        "%s is circling. %s. Raise or clean the report card, then close — "
+        "about %d month%s left."
+        % (who, why[0].upper() + why[1:] if why else why, months,
+           "" if months == 1 else "s"),
+        "A held deal is not a reservation. The rival does not wait for "
+        "your capital raise.",
+        "treasury",
+        [_goto("Open Treasury", "treasury")])
+
+
+def engine_deal_proforma(state, deal):
+    from . import engine
+    return engine.deal_proforma(state, deal)
+
+
+def _r_list_common(state):
+    from . import funding as FUND
+    prev = FUND.listing_preview(state)
+    if isinstance(prev, str):
+        return None
+    return _card(
+        "list_common", 0, "You are big enough to list the stock",
+        "A listing costs %s in fees and prints a public price (about %.2fx "
+        "book, $%s a share). After that, buybacks hit the last print and "
+        "you can pay 40%% of a private deal in new stock. This is your "
+        "share price, not a stock-market minigame."
+        % (_fm(prev["fees"]), prev["price_to_book"],
+           f"{prev['px'] // 100:,}"),
+        "Private raises still work. Listing is a regional event — $500M "
+        "of assets, a 1–2 report card, well-capitalized.",
+        "treasury",
+        [_act("List the common stock", "list_common", {})])
+
+
 def _r_digital(state):
     """I3f / I7: only recommend digital when the preview is not 7% of book."""
     if not state["metrics"] or not state["metrics"][-1].get("earnings_ready"):
@@ -830,9 +1019,10 @@ def _r_digital(state):
 
 
 _RULES = [
-    _r_run_defense, _r_camels_repair, _r_capital_repair, _r_rate_risk, _r_bsa_weak,
-    _r_deposit_lag, _r_funding_stretch, _r_sell_mortgages, _r_late_cycle, _r_recession_cre,
+    _r_run_defense, _r_camels_repair, _r_mra_due, _r_capital_repair, _r_rate_risk, _r_bsa_weak,
+    _r_deposit_lag, _r_funding_stretch, _r_sell_seasoned, _r_sell_mortgages, _r_late_cycle, _r_recession_cre,
     _r_hire_lender, _r_second_county, _r_open_second_office, _r_digital,
+    _r_market_leak, _r_pipeline_deal, _r_list_common, _r_credit_box_scale,
     _r_excess_cash, _r_uninsured_watch, _r_exam_prep,
     _r_fraud_weak, _r_core_old, _r_brand_decay, _r_hoarding,
 ]
