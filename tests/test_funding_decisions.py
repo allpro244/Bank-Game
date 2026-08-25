@@ -121,6 +121,47 @@ class TestFundingDecisions(unittest.TestCase):
         self.assertEqual(state["bank"]["funding"]["fhlb"][-1]["months_left"],
                          FUND.OVERNIGHT_FHLB_MONTHS)
 
+    def test_month_open_card_names_the_notes_we_just_booked(self):
+        """The hole is real. The card has to say we just funded the month."""
+        state = new_game("Notes", seed=5)
+        state["time"]["date"] = "2000-02-01"  # Tuesday, month-open morning
+        _drain_cash(state, 0)
+        LN.originate_month(state, engine._rng(state, "credit"))
+        booked = state["bank"]["loans"]["stats"]["originated_mtd"]
+        self.assertGreater(booked, 0)
+        self.assertLess(state["bank"]["ledger"]["balances"]["1000"], 0)
+        evs = FUND.manage_overnight(state)
+        short = [e for e in evs if e.get("type") == "overnight_shortfall"]
+        self.assertTrue(short)
+        ev = short[0]
+        amt = f"{booked // 100:,}"
+        self.assertEqual(ev["originated"], booked)
+        self.assertIn(amt, ev["cause"])
+        self.assertIn("new notes", ev["cause"])
+        self.assertIn("vault is empty", ev["cause"])
+        self.assertIn(amt, ev["text"])
+        self.assertIn("bond book", ev["text"])
+        self.assertIn("does not fill this hole", ev["text"])
+        self.assertIn(amt, ev["owner_summary"])
+        self.assertIn("new loans", ev["owner_summary"])
+        # ask still does not touch the window
+        self.assertEqual(state["bank"]["funding"]["discount_window_uses"], 0)
+        self.assertEqual(L.trial_balance(state["bank"]["ledger"]), 0)
+
+    def test_mid_month_hole_does_not_claim_we_just_booked(self):
+        state = new_game("Mid", seed=5)
+        state["time"]["date"] = "2000-01-18"
+        state["bank"]["loans"]["stats"]["originated_mtd"] = 1_500_000_00
+        _drain_cash(state, 200_000_00)
+        evs = FUND.manage_overnight(state)
+        short = [e for e in evs if e.get("type") == "overnight_shortfall"]
+        self.assertTrue(short)
+        ev = short[0]
+        self.assertIsNone(ev.get("cause"))
+        self.assertEqual(ev.get("originated") or 0, 0)
+        self.assertNotIn("new notes", ev["text"])
+        self.assertNotIn("we just funded", ev["text"].lower())
+
 
 if __name__ == "__main__":
     unittest.main()
