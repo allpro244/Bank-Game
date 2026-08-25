@@ -476,6 +476,11 @@ def raise_common(state, amount):
            [["1000", terms["net"], 0], ["5170", terms["fees"], 0],
             ["3000", 0, terms["amount"]]], tag="cap")
     bank["shares"] += terms["shares_issued"]
+    bank["last_common_raise_month"] = state["economy"]["months"]
+    adv = state.get("advisor")
+    if isinstance(adv, dict):
+        adv.setdefault("dismissed", {})
+        adv["dismissed"]["capital_repair"] = state["economy"]["months"]
     return {"shares_issued": terms["shares_issued"],
             "price_to_book": terms["price_to_book"]}
 

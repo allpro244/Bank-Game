@@ -122,6 +122,22 @@ def office_count(state, market_id):
                if b.get("market") == market_id and b.get("open"))
 
 
+def office_effective(n_offices):
+    """How many full catchments N windows actually contest.
+
+    First office is a full trade area. Extra windows overlap the same
+    streets — five Houston branches are not five Dallases.
+    """
+    n = max(1, int(n_offices))
+    return 1.0 + 0.42 * (n - 1) ** 0.65
+
+
+def office_size_boost(n_offices):
+    """First office is 1.0× so A1 size caps do not move."""
+    n = max(0, int(n_offices))
+    return min(1.28, 1.0 + 0.10 * max(0, n - 1))
+
+
 def trade_pool(state, market_id, extra_offices=0):
     """Deposit pool this franchise can actually contest in `market_id`."""
     region = state["regions"][market_id]
@@ -133,7 +149,7 @@ def trade_pool(state, market_id, extra_offices=0):
     if n <= 0:
         n = 1
     digital = state["bank"]["ops"].get("digital_level", 0)
-    catch = int(cap_one * n * (1.0 + 0.12 * digital))
+    catch = int(cap_one * office_effective(n) * (1.0 + 0.12 * digital))
     return max(1, min(pool, catch))
 
 
@@ -201,8 +217,7 @@ def size_share_cap(state, market_id, assets=None, extra_offices=0):
     n = office_count(state, market_id) + extra_offices
     # Extra windows lift how much of the town you can actually hold.
     # First office is 1.0× so A1 size caps do not move.
-    office_boost = min(1.75, 1.0 + 0.22 * max(0, n - 1))
-    return (assets * mult * office_boost) / pool
+    return (assets * mult * office_size_boost(n)) / pool
 
 
 def share_of_full_pool(state, market_id, extra_offices=0, maturity=None):

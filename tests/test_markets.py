@@ -74,6 +74,17 @@ class TestMarkets(unittest.TestCase):
         # $900M seizure. Year-1 deposits stay a rounding error vs the pool.
         self.assertLess(nyc["year1_gather"], nyc["pool"] * 0.001)
 
+    def test_metro_offices_do_not_stack_full_catchments(self):
+        state = new_game("Stack", seed=11)
+        one = DEP.trade_pool(state, "houston", extra_offices=1)
+        five = DEP.trade_pool(state, "houston", extra_offices=5)
+        self.assertGreater(five, one)
+        self.assertLess(five, one * 3,
+                        "five Houston windows must overlap, not 5× catchment")
+        self.assertAlmostEqual(DEP.office_effective(1), 1.0)
+        self.assertAlmostEqual(DEP.office_size_boost(1), 1.0)
+        self.assertLess(DEP.office_size_boost(5), 1.30)
+
     def test_second_office_preview_is_not_blocked(self):
         state = new_game("Home2", seed=4)
         prev = OPS.preview_branch(state, "caprock")

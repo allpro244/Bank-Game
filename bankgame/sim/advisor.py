@@ -18,6 +18,7 @@ from . import securities as SEC
 from . import funding as FUND
 
 DISMISS_MONTHS = 6      # a dismissed card stays quiet this long
+RAISE_COOLDOWN_MONTHS = 3   # one sitting must not raise twenty times
 TUTORIAL_MAX_MONTHS = 18
 
 
@@ -222,7 +223,11 @@ def cards(state):
         if card is None:
             continue
         when = adv["dismissed"].get(card["id"])
-        if when is not None and months - when < DISMISS_MONTHS and card["sev"] < 2:
+        # Sev 2 usually stays sticky. capital_repair is the exception:
+        # dismiss and a just-completed raise both have to stick, or one
+        # sitting can dilute the book twenty times.
+        honor_dismiss = card["sev"] < 2 or card["id"] == "capital_repair"
+        if when is not None and months - when < DISMISS_MONTHS and honor_dismiss:
             continue
         found.append(card)
     found.sort(key=lambda c: -c["sev"])
@@ -287,6 +292,9 @@ def _r_run_defense(state):
 def _r_capital_repair(state):
     reg = state["regulation"]
     if reg["pca"] == "well":
+        return None
+    last = state["bank"].get("last_common_raise_month")
+    if last is not None and state["economy"]["months"] - last < RAISE_COOLDOWN_MONTHS:
         return None
     r = REG.capital_ratios(state)
     shortfall = int(max(0, 0.09 * r["rwa"] - r["cet1"]) * 1.1)
@@ -380,8 +388,6 @@ def _r_hire_lender(state):
         util = 2.0
     else:
         util = bank["loans"]["stats"].get("originated_mtd", 0) / cap
-    if util < 0.88:
-        return None
     m = state["metrics"][-1] if state["metrics"] else {}
     ldr = m.get("loan_to_deposit") or (
         LN.total_loans(bank["loans"]) / max(1, L.total_deposits(bank["ledger"])))
@@ -395,18 +401,39 @@ def _r_hire_lender(state):
     preview = LN.preview_hire_lender(state)
     if not preview["positive"]:
         return None
+    assets = max(0, bank.get("cached_assets") or 0)
+    maxed = util >= 0.88
+    # Opening LDR sits 0.65–0.80 by design. Only nag a real franchise
+    # whose deposits have outrun the loan desk.
+    stuck = ldr < 0.70 and assets >= 80_000_000_00
+    if not maxed and not stuck:
+        return None
     lenders = bank["ops"]["staff"]["lenders"]
     sal = int(lenders["salary"] * bank["ops"]["salary_multiplier"])
+    if stuck and not maxed:
+        title = "Deposits are outrunning the loan book"
+        text = (
+            "Loan-to-deposit is %.0f%%. Your lenders can book about %s a "
+            "month; that will not catch a franchise this size. Another "
+            "lender costs about %s a year and the first-year book they "
+            "write is worth about %s of interest — net %s."
+            % (ldr * 100, _fm(cap), _fm(sal), _fm(preview["extra_ni"]),
+               _fm(preview["net"])))
+    else:
+        title = "Your lenders are maxed out"
+        text = (
+            "Loan production is running at %.0f%% of what your %d lender%s "
+            "can handle. Another lender costs about %s a year and the "
+            "first-year book they write is worth about %s of interest — "
+            "net %s. That is why this card is here."
+            % (util * 100, lenders["count"],
+               "s" if lenders["count"] != 1 else "",
+               _fm(sal), _fm(preview["extra_ni"]), _fm(preview["net"])))
     return _card(
-        "hire_lender", 1, "Your lenders are maxed out",
-        "Loan production is running at %.0f%% of what your %d lender%s can "
-        "handle. Another lender costs about %s a year and the first-year "
-        "book they write is worth about %s of interest — net %s. That is "
-        "why this card is here."
-        % (util * 100, lenders["count"], "s" if lenders["count"] != 1 else "",
-           _fm(sal), _fm(preview["extra_ni"]), _fm(preview["net"])),
+        "hire_lender", 1, title, text,
         "Lender headcount is a hard cap on monthly loan originations "
-        "(Operations tab). Skill and morale scale each lender's capacity.",
+        "(Operations tab). Skill, morale, and franchise size scale each "
+        "lender's capacity.",
         "ops",
         [_act("Hire a lender", "hire", {"role": "lenders", "count": 1})])
 

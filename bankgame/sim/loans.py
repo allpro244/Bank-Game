@@ -334,19 +334,36 @@ def macro_pd_mult(state, product, market_id):
     return min(9.0, m)
 
 
+def franchise_origination_scale(state):
+    """How much one lender books vs a $25M community book.
+
+    Opening-scale stays 1.0 so hire-covers-cost and the 3-year LDR
+    band do not move. A $10B franchise is not still $3.6M/month.
+    """
+    assets = max(1, state["bank"].get("cached_assets") or 1)
+    if assets <= 1:
+        assets = max(1, L.total_assets(state["bank"]["ledger"]))
+    community = 25_000_000_00
+    return min(14.0, (max(community, assets) / community) ** 0.40)
+
+
+def _per_lender_capacity(state):
+    staff = state["bank"]["ops"]["staff"]["lenders"]
+    # Sized so one opening-skill lender's extra book covers fully-loaded pay.
+    base = 3_600_000_00 * (0.6 + 0.2 * staff["skill"]) * max(0.4, staff["morale"])
+    return int(base * franchise_origination_scale(state))
+
+
 def lender_capacity(state):
     """Monthly origination capacity in cents, from lending staff."""
-    staff = state["bank"]["ops"]["staff"]
-    lenders = staff["lenders"]
-    # Sized so one opening-skill lender's extra book covers fully-loaded pay.
-    per = 3_600_000_00 * (0.6 + 0.2 * lenders["skill"])
-    return int(lenders["count"] * per * max(0.4, lenders["morale"]))
+    return int(state["bank"]["ops"]["staff"]["lenders"]["count"]
+               * _per_lender_capacity(state))
 
 
 def preview_hire_lender(state):
     """12-month NI of one more lender vs fully-loaded salary. Cents."""
     staff = state["bank"]["ops"]["staff"]["lenders"]
-    per = 3_600_000_00 * (0.6 + 0.2 * staff["skill"]) * max(0.4, staff["morale"])
+    per = _per_lender_capacity(state)
     extra_ni = int(per * 6 * 0.045)   # first-year average book × NIM
     cost = int(staff["salary"] * state["bank"]["ops"]["salary_multiplier"] * 1.38)
     return {"extra_ni": extra_ni, "cost": cost, "net": extra_ni - cost,

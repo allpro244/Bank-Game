@@ -356,5 +356,54 @@ class TestCamelsOrderLoop(unittest.TestCase):
         self.assertIn("grow", blob)
 
 
+class TestPlaytestLeftovers(unittest.TestCase):
+    def test_play_until_does_not_freeze_on_a_run(self):
+        state = new_game("RunClk", seed=2)
+        state["bank"]["loans"]["queue"].clear()
+        state["events"]["pending"].clear()
+        state["crisis"]["run_active"] = True
+        state["crisis"]["rumor"] = 0.60
+        self.assertIsNone(engine.interrupt_reason(state))
+        res = engine.advance(state, "until", max_days=3)
+        self.assertGreater(res["days"], 0)
+
+    def test_lenders_scale_with_franchise_size(self):
+        state = new_game("Book", seed=1)
+        opening = LN.lender_capacity(state)
+        self.assertTrue(LN.preview_hire_lender(state)["positive"])
+        state["bank"]["cached_assets"] = 10_000_000_000_00
+        big = LN.lender_capacity(state)
+        self.assertGreater(big, opening * 8)
+        self.assertLess(big, opening * 16)
+
+    def test_hire_lender_card_fires_when_ldr_is_stuck(self):
+        from bankgame.sim import advisor
+        state = new_game("Stuck", seed=1)
+        state["bank"]["cached_assets"] = 100_000_000_00
+        state["metrics"] = [{"loan_to_deposit": 0.29, "earnings_ready": True,
+                             "roa": 0.01, "equity": 20_000_000_00,
+                             "assets": 100_000_000_00}]
+        state["bank"]["loans"]["stats"]["originated_mtd"] = 0
+        card = advisor._r_hire_lender(state)
+        self.assertIsNotNone(card)
+        self.assertIn("deposit", card["text"].lower())
+
+    def test_capital_repair_cools_down_after_a_raise(self):
+        from bankgame.sim import advisor
+        state = new_game("RaiseSpam", seed=5)
+        state["regulation"]["pca"] = "adequate"
+        self.assertIn("capital_repair", [c["id"] for c in advisor.cards(state)])
+        engine.perform_action(state, "raise_common", {"amount": 1_000_000_00})
+        self.assertNotIn("capital_repair", [c["id"] for c in advisor.cards(state)])
+
+    def test_capital_repair_honors_dismiss(self):
+        from bankgame.sim import advisor
+        state = new_game("RaiseD", seed=5)
+        state["regulation"]["pca"] = "adequate"
+        self.assertIn("capital_repair", [c["id"] for c in advisor.cards(state)])
+        advisor.dismiss(state, "capital_repair")
+        self.assertNotIn("capital_repair", [c["id"] for c in advisor.cards(state)])
+
+
 if __name__ == "__main__":
     unittest.main()
