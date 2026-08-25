@@ -908,6 +908,50 @@ def _r_mra_due(state):
         [_goto("Open Risk & Reg", "risk")])
 
 
+def _r_pipeline_deal(state):
+    """A book in diligence — close before the circling rival does."""
+    pipe = state.get("ma_pipeline") or []
+    if not pipe:
+        return None
+    item = pipe[0]
+    deal = item.get("deal") or {}
+    pf = engine_deal_proforma(state, deal)
+    who = item.get("rival_name") or "a rival"
+    months = max(1, int(item.get("months_left") or 1))
+    town = state["regions"].get(deal.get("market"), {}).get("name", "")
+    if pf.get("can_buy"):
+        return _card(
+            "pipeline_deal", 1, "%s is still for sale — %s is circling"
+            % (deal.get("name") or "The target", who),
+            "%s%s is in diligence. About %d month%s left. Close it from "
+            "the desk or they take the franchise."
+            % (deal.get("name") or "The book",
+               (" in %s" % town) if town else "",
+               months, "" if months == 1 else "s"),
+            "Holding is a bet the seller waits. Pass and a roll-up often "
+            "closes the same week. This card does not buy the bank.",
+            "desk",
+            [_act("Buy %s" % (deal.get("name") or "the bank"),
+                  "close_pipeline", {"pipeline_id": item["id"]})])
+    why = "; ".join(pf.get("blockers") or []) or "you cannot close today"
+    return _card(
+        "pipeline_deal", 1, "%s is still for sale — you cannot close yet"
+        % (deal.get("name") or "The target"),
+        "%s is circling. %s. Raise or clean the report card, then close — "
+        "about %d month%s left."
+        % (who, why[0].upper() + why[1:] if why else why, months,
+           "" if months == 1 else "s"),
+        "A held deal is not a reservation. The rival does not wait for "
+        "your capital raise.",
+        "treasury",
+        [_goto("Open Treasury", "treasury")])
+
+
+def engine_deal_proforma(state, deal):
+    from . import engine
+    return engine.deal_proforma(state, deal)
+
+
 def _r_list_common(state):
     from . import funding as FUND
     prev = FUND.listing_preview(state)
@@ -953,7 +997,7 @@ _RULES = [
     _r_run_defense, _r_camels_repair, _r_mra_due, _r_capital_repair, _r_rate_risk, _r_bsa_weak,
     _r_deposit_lag, _r_funding_stretch, _r_sell_mortgages, _r_late_cycle, _r_recession_cre,
     _r_hire_lender, _r_second_county, _r_open_second_office, _r_digital,
-    _r_market_leak, _r_list_common, _r_credit_box_scale,
+    _r_market_leak, _r_pipeline_deal, _r_list_common, _r_credit_box_scale,
     _r_excess_cash, _r_uninsured_watch, _r_exam_prep,
     _r_fraud_weak, _r_core_old, _r_brand_decay, _r_hoarding,
 ]

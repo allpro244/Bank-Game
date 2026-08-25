@@ -422,6 +422,7 @@ async function tabDesk(m) {
       <b>Report card is a ${SUM.franchise.camels}.</b> ${esc(SUM.franchise.exam_path.needed || '')}
       ${(SUM.franchise.exam_path.actions || []).slice(0, 2).map(a => ' ' + esc(a)).join('')}
     </div>` : ''}
+    ${pipelineBanner(d.pipeline || (SUM.franchise && SUM.franchise.pipeline))}
 
     <div class="gauges">
       ${g.map(x => `
@@ -1521,6 +1522,23 @@ function confirmOpenBranch(market, source) {
   ]);
 }
 
+function pipelineBanner(pipe) {
+  if (!pipe || !pipe.length) return '';
+  return pipe.map(item => {
+    const deal = item.deal || {};
+    const who = item.rival_name || 'A rival';
+    const mo = item.months_left == null ? '?' : item.months_left;
+    return `<div class="banner" style="margin-bottom:10px;border-color:var(--warn)">
+      <b>${esc(deal.name || 'A book')} is in diligence.</b>
+      ${esc(who)} is circling — about ${mo} month${mo === 1 ? '' : 's'} left.
+      <div class="btnrow" style="margin-top:6px">
+        <button class="small primary" onclick="act('close_pipeline',{pipeline_id:${item.id}})">Buy it</button>
+        <button class="small" onclick="act('drop_pipeline',{pipeline_id:${item.id}})">Pass</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
 function mraBanner(d) {
   const live = (d.mras || []).filter(m => m.status === 'open' || m.status === 'missed');
   if (!live.length) return '';
@@ -2023,8 +2041,9 @@ function renderEventModal() {
       <button class="primary" ${blocked ? 'disabled title="' + esc(why) + '"' : ''}
         onclick="eventChoice(${ev.id}, 'buy')">${blocked ? 'Cannot close' : 'Buy it (cash)'}</button>
       ${listed && !blocked ? `<button onclick="eventChoice(${ev.id}, 'buy_stock')">Buy 60% cash / 40% stock</button>` : ''}
+      <button onclick="eventChoice(${ev.id}, 'hold')">Hold in diligence</button>
       <button onclick="eventChoice(${ev.id}, 'pass')">Pass</button></div>
-      ${blocked ? `<div class="helptip">${esc(why)}</div>` : ''}`;
+      ${blocked ? `<div class="helptip">${esc(why)} Hold parks the book so you can raise; a rival may close it.</div>` : ''}`;
   } else if (ev.type === 'exam') {
     const comp = ev.composite || 3;
     const owner = MODE === 'owner' && ev.owner_title;

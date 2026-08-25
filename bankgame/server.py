@@ -133,6 +133,7 @@ class Game:
                 "exam_path": (REG.exam_recovery_advice(s)
                               if s["regulation"]["camels"]["composite"] >= 4
                               else None),
+                "pipeline": s.get("ma_pipeline") or [],
             },
             "unlock": {
                 "months_closed": len(s["metrics"]),
@@ -436,6 +437,7 @@ class Game:
                     "loans": _queue_payload(bank["loans"]["queue"]),
                     "fraud": open_cases,
                 },
+                "pipeline": s.get("ma_pipeline") or [],
                 "peer_avg": ADV.peer_averages(s),
                 "goal": GOALS.progress(s),
             }

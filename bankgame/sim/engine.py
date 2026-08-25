@@ -264,6 +264,8 @@ def _process_month_boundary(state, prev_date):
     for ev in regulation.monthly_update(state, _rng(state, "misc")):
         raised.append(push_event(state, ev))
     _integration_month(state, _rng(state, "misc"))
+    for ev in _pipeline_month(state, _rng(state, "event")):
+        raised.append(push_event(state, ev))
 
     if quarter_end:
         loans.quarterly_cecl(state)
@@ -516,9 +518,28 @@ def _ma_opportunities(state, rng):
                     "market": target_mkt, "credit_mark": round(rng.uniform(0.02, 0.09), 3)}
             pf = deal_proforma(state, deal)
             deal["proforma"] = pf
-            choices = ["buy", "pass"]
+            rival = competitors.circling_rival(state, deal)
+            if rival:
+                deal["circling_id"] = rival["id"]
+                deal["circling_name"] = rival["name"]
+            choices = ["buy", "hold", "pass"]
             if state["bank"].get("listed"):
-                choices = ["buy", "buy_stock", "pass"]
+                choices = ["buy", "buy_stock", "hold", "pass"]
+            if rival:
+                threat = (
+                    "\n\n%s is circling this book. Buy now, hold it in diligence "
+                    "(about three months — they may close while you raise), or pass "
+                    "and they likely take it this week." % rival["name"])
+            else:
+                threat = ("\n\nNo living rival can fund this book. Hold or pass "
+                          "without losing it to the street.")
+            close_note = (
+                (" Cannot close: " + "; ".join(pf["blockers"]) + ".")
+                if pf["blockers"] else
+                " Regulatory approval still needs CAMELS 1-2, no orders, "
+                "satisfactory CRA.")
+            if state["bank"].get("listed"):
+                close_note += " Listed: you can pay 40% in stock at the last print."
             events.append({
                 "type": "bank_for_sale", "blocking": True,
                 "choices": choices,
@@ -528,19 +549,14 @@ def _ma_opportunities(state, rng):
                          "(%.2fx tangible book). Due diligence estimates a %d%% credit mark "
                          "on their loans and typical integration attrition of 5-12%% of "
                          "deposits.\n\nPro-forma after close: CET1 %.1f%%, leverage %.1f%% "
-                         "(%s-capitalized).%s"
+                         "(%s-capitalized).%s%s"
                          % (name, f"{t_assets // 100 // 1_000_000:,}",
                             state["regions"][target_mkt]["name"],
                             t_assets / max(1, assets),
                             f"{price // 100:,}",
                             mult, int(deal["credit_mark"] * 100),
                             pf["cet1"] * 100, pf["leverage"] * 100, pf["pca"],
-                            (" Cannot close: " + "; ".join(pf["blockers"]) + ".")
-                            if pf["blockers"] else
-                            " Regulatory approval still needs CAMELS 1-2, no orders, "
-                            "satisfactory CRA.")
-                            + (" Listed: you can pay 40% in stock at the last print."
-                               if state["bank"].get("listed") else "")),
+                            close_note, threat)),
                 "deal": deal,
             })
 
@@ -768,6 +784,119 @@ def _absorb_franchise(state, markets, deposits_amt, loans_amt, n_branches, src_n
                 "quality": 2, "monthly_cost": operations.BRANCH_MONTHLY,
                 "opened": state["time"]["date"], "acquired_from": src_name})
             bank["ops"]["next_branch_id"] += 1
+
+
+def pipeline(state):
+    return state.setdefault("ma_pipeline", [])
+
+
+def park_deal(state, ev):
+    """Hold a private deal in diligence. Clock can run; a rival may close."""
+    deal = ev.get("deal")
+    if not deal:
+        return "no deal to hold"
+    pipe = pipeline(state)
+    if any(x.get("deal", {}).get("name") == deal.get("name") for x in pipe):
+        return "that book is already in diligence"
+    if len(pipe) >= 2:
+        return "you already have two books in diligence"
+    rid = state.setdefault("next_pipeline_id", 1)
+    state["next_pipeline_id"] = rid + 1
+    item = {
+        "id": rid,
+        "deal": deal,
+        "rival_id": deal.get("circling_id"),
+        "rival_name": deal.get("circling_name"),
+        "months_left": 3,
+        "parked": state["time"]["date"],
+    }
+    pipe.append(item)
+    return item
+
+
+def rival_closes_deal(state, item):
+    """A circling rival buys the packet. Player ledger unchanged."""
+    deal = item.get("deal") or {}
+    rival = competitors.find_rival(state, item.get("rival_id"))
+    if rival is None or not rival.get("alive"):
+        rival = competitors.circling_rival(state, deal)
+    took = False
+    if rival:
+        took = competitors.rival_takes_packet(state, deal, rival)
+    name = deal.get("name") or "the target"
+    who = (rival or {}).get("name") or "A larger bank"
+    town = state["regions"].get(deal.get("market"), {}).get("name", "")
+    if took:
+        title = "%s bought %s" % (who, name)
+        text = ("%s closed the book you were sizing%s. That franchise "
+                "is off the map. Next time, buy or pass — holding is a bet "
+                "they wait."
+                % (who, (" in %s" % town) if town else ""))
+    else:
+        title = "%s came off the market" % name
+        text = "The seller walked. No living rival could fund the book either."
+    return {
+        "type": "deal_stolen", "blocking": True,
+        "title": title, "text": text,
+        "deal_name": name,
+        "rival_name": who if took else None,
+        "stolen": took,
+    }
+
+
+def _pipeline_month(state, rng):
+    """Each month on the market raises the chance a rival closes."""
+    events = []
+    keep = []
+    for item in list(pipeline(state)):
+        item["months_left"] = int(item.get("months_left") or 0) - 1
+        early = bool(item.get("rival_id")) and rng.chance(0.18)
+        if item["months_left"] <= 0 or early:
+            events.append(rival_closes_deal(state, item))
+            continue
+        keep.append(item)
+    state["ma_pipeline"] = keep
+    return events
+
+
+def close_pipeline_deal(state, item_id, stock_frac=0.0):
+    pipe = pipeline(state)
+    item = next((x for x in pipe if x["id"] == item_id), None)
+    if item is None:
+        return "that deal is no longer on the market"
+    item["deal"]["proforma"] = deal_proforma(state, item["deal"])
+    res = _resolve_bank_purchase(state, {"deal": item["deal"]},
+                                 stock_frac=stock_frac)
+    if isinstance(res, str):
+        return res
+    pipe.remove(item)
+    return res
+
+
+def pass_private_deal(state, deal, force=None):
+    """Walk away from a private book. A circling rival often takes it."""
+    rival = competitors.find_rival(state, deal.get("circling_id")) \
+        or competitors.circling_rival(state, deal)
+    rng = _rng(state, "event")
+    steal = force if force is not None else (bool(rival) and rng.chance(0.70))
+    if steal and rival and competitors.rival_takes_packet(state, deal, rival):
+        return {
+            "message": "You passed. %s bought %s the same week."
+                       % (rival["name"], deal.get("name") or "the bank"),
+            "stolen": True, "rival_name": rival["name"],
+        }
+    return {"message": "You passed. The seller stayed independent.",
+            "stolen": False}
+
+
+def drop_pipeline_deal(state, item_id):
+    pipe = pipeline(state)
+    item = next((x for x in pipe if x["id"] == item_id), None)
+    if item is None:
+        return "that deal is no longer on the market"
+    res = pass_private_deal(state, item.get("deal") or {})
+    pipe.remove(item)
+    return res
 
 
 def _integration_month(state, rng):
@@ -1151,6 +1280,19 @@ def perform_action(state, action, payload):
         advisor.tutorial_off(state)
         return {"message": "Tour dismissed. It won't come back."}
 
+    if action == "close_pipeline":
+        stock = 0.40 if p.get("stock") else 0.0
+        res = close_pipeline_deal(state, int(_num("pipeline_id")), stock_frac=stock)
+        if isinstance(res, str):
+            raise ActionError(res)
+        return res
+
+    if action == "drop_pipeline":
+        res = drop_pipeline_deal(state, int(_num("pipeline_id")))
+        if isinstance(res, str):
+            raise ActionError(res)
+        return res
+
     if action == "retire":
         _game_over(state, "retired")
         return {"message": "You retired. See the epilogue."}
@@ -1172,7 +1314,15 @@ def _handle_event_choice(state, ev, choice, payload):
 
     if ev["type"] == "bank_for_sale":
         if choice == "pass":
-            return {"message": "You passed on the deal."}
+            return pass_private_deal(state, ev.get("deal") or {})
+        if choice == "hold":
+            item = park_deal(state, ev)
+            if isinstance(item, str):
+                raise ActionError(item)
+            who = (ev.get("deal") or {}).get("circling_name") or "a rival"
+            return {"message": "The book is in diligence. %s is still circling. "
+                               "You have about three months." % who,
+                    "pipeline_id": item["id"]}
         stock = 0.40 if choice == "buy_stock" else 0.0
         res = _resolve_bank_purchase(state, ev, stock_frac=stock)
         if isinstance(res, str):

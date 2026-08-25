@@ -148,7 +148,7 @@ start them to avoid finishing A.
 
 - Per-market deposit pricing (offsets by market, promo money). **Shipped.**
 - Loan sales/participations and a securitization shelf.
-- Competitor M&A against the player's targets; hostile offers.
+- Competitor M&A against the player's targets; hostile offers. **Shipped** (hold / pass / 3-month steal).
 - Examiner remediation tracks (MRAs with deadlines). **Shipped.**
 - Duration-matched EVE dashboard with +/-100/200/300bp shocks. **Shipped.**
 - Named key employees (a CFO, a chief credit officer) with traits.

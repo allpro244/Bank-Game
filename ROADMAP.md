@@ -641,7 +641,7 @@ as project work. Do not start H to avoid finishing A or I.
 | Item | Why it waits | Sketch |
 | --- | --- | --- |
 | Per-market deposit pricing | A1 is sane | **Shipped with listing / weight-class towns** — franchise offset + town override; Desk card when one town leaks |
-| Competitor M&A vs your targets | Needs A3 pipeline | Rivals can buy the bank you were sizing |
+| Competitor M&A vs your targets | Needs A3 pipeline | **Shipped** — hold parks a book; pass or a 3-month clock lets a circling rival close |
 | Examiner MRAs with deadlines | Needs B7 exam as set piece | **Shipped** — 1–2 measurable items after a 3+; miss grades M once; a 2 writes none |
 | EVE / ±100–300 bp dashboard | Needs B3 owner labels | **Shipped** — duration-gap table on Treasury; one sentence on Risk |
 | Named officers (CFO, CCO) | After E3 relationships | Traits that nudge capacity, exam M, defects |

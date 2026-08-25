@@ -100,5 +100,80 @@ class TestMA(unittest.TestCase):
                             % (seed, f"{peak // 100:,}"))
 
 
+def _sized_deal(state, name="Farmers State Bank"):
+    from bankgame.sim import competitors as C
+    assets = state["bank"].get("cached_assets") or L.total_assets(state["bank"]["ledger"])
+    deal = {"name": name, "assets": int(assets * 0.25),
+            "price": 400_000_00, "market": "verhalen", "credit_mark": 0.05}
+    rival = C.circling_rival(state, deal)
+    if rival:
+        deal["circling_id"] = rival["id"]
+        deal["circling_name"] = rival["name"]
+    return deal
+
+
+class TestRivalStealsTarget(unittest.TestCase):
+    def test_hold_parks_the_book_and_the_clock_can_run(self):
+        state = new_game("Hold", seed=4)
+        state["bank"]["loans"]["queue"].clear()
+        snap = copy.deepcopy(state["bank"]["ledger"]["balances"])
+        deal = _sized_deal(state)
+        item = engine.park_deal(state, {"deal": deal})
+        self.assertIsInstance(item, dict)
+        self.assertEqual(len(state["ma_pipeline"]), 1)
+        self.assertEqual(state["bank"]["ledger"]["balances"], snap)
+        res = engine.advance(state, "until", max_days=5)
+        self.assertGreater(res["days"], 0)
+
+    def test_pass_lets_a_rival_take_the_book(self):
+        from bankgame.sim import competitors as C
+        state = new_game("Pass", seed=4)
+        deal = _sized_deal(state)
+        rival = C.find_rival(state, deal["circling_id"])
+        before = rival["assets"]
+        snap = copy.deepcopy(state["bank"]["ledger"]["balances"])
+        res = engine.pass_private_deal(state, deal, force=True)
+        self.assertTrue(res["stolen"])
+        self.assertEqual(state["bank"]["ledger"]["balances"], snap)
+        self.assertGreater(rival["assets"], before)
+        self.assertIn("verhalen", rival["markets"])
+
+    def test_close_from_pipeline_buys_the_book(self):
+        state = new_game("Close", seed=9)
+        engine.perform_action(state, "raise_common", {"amount": 5_000_000_00})
+        deal = _sized_deal(state)
+        item = engine.park_deal(state, {"deal": deal})
+        res = engine.close_pipeline_deal(state, item["id"])
+        self.assertIsInstance(res, dict)
+        self.assertFalse(state["ma_pipeline"])
+        self.assertEqual(L.trial_balance(state["bank"]["ledger"]), 0)
+
+    def test_deadline_steals_the_book(self):
+        from bankgame.sim import competitors as C
+        state = new_game("Late", seed=4)
+        deal = _sized_deal(state)
+        rival = C.find_rival(state, deal["circling_id"])
+        before = rival["assets"]
+        item = engine.park_deal(state, {"deal": deal})
+        item["months_left"] = 0
+        evs = engine._pipeline_month(state, engine._rng(state, "event"))
+        self.assertTrue(evs)
+        self.assertEqual(evs[0]["type"], "deal_stolen")
+        self.assertTrue(evs[0]["stolen"])
+        self.assertFalse(state["ma_pipeline"])
+        self.assertGreater(rival["assets"], before)
+        self.assertEqual(L.trial_balance(state["bank"]["ledger"]), 0)
+
+    def test_advisor_names_the_circling_rival(self):
+        from bankgame.sim import advisor
+        state = new_game("Card", seed=4)
+        engine.perform_action(state, "raise_common", {"amount": 5_000_000_00})
+        deal = _sized_deal(state)
+        engine.park_deal(state, {"deal": deal})
+        card = advisor._r_pipeline_deal(state)
+        self.assertIsNotNone(card)
+        self.assertIn(deal["circling_name"].split()[0], card["title"] + card["text"])
+
+
 if __name__ == "__main__":
     unittest.main()
