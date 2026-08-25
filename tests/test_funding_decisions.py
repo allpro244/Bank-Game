@@ -99,17 +99,83 @@ class TestFundingDecisions(unittest.TestCase):
         self.assertEqual(state["bank"]["funding"]["discount_window_uses"], uses)
         self.assertTrue(state["bank"]["funding"].get("shrink_originations"))
 
-    def test_wait_shrinks_next_month_originations(self):
+    def test_wait_replaces_paydowns_instead_of_running_off(self):
         a = new_game("A", seed=9)
         b = new_game("B", seed=9)
         a["bank"]["loans"]["queue"].clear()
         b["bank"]["loans"]["queue"].clear()
+        paydowns = 400_000_00
+        for st in (a, b):
+            log = st["bank"]["loans"].setdefault("month_log", {})
+            log["principal"] = paydowns
         b["bank"]["funding"]["shrink_originations"] = True
         LN.originate_month(a, engine._rng(a, "credit"))
         LN.originate_month(b, engine._rng(b, "credit"))
         self.assertLess(b["bank"]["loans"]["stats"]["originated_mtd"],
                         a["bank"]["loans"]["stats"]["originated_mtd"])
-        self.assertFalse(b["bank"]["funding"].get("shrink_originations"))
+        # Wait = replace what paid off, not 25% of demand and not zero.
+        self.assertLessEqual(b["bank"]["loans"]["stats"]["originated_mtd"],
+                             paydowns)
+        self.assertGreater(b["bank"]["loans"]["stats"]["originated_mtd"],
+                           int(paydowns * 0.70))
+
+    def test_flow_originations_leave_payroll(self):
+        state = new_game("Pay", seed=5)
+        state["bank"]["loans"]["queue"].clear()
+        reserve = LN._opex_reserve(state)
+        LN.originate_month(state, engine._rng(state, "credit"))
+        cash = LN._spendable_cash(state)
+        self.assertGreaterEqual(cash, reserve - 5_000_00)
+
+    def test_ask_wait_does_not_run_off_the_books(self):
+        """Doing nothing + Wait cannot shrink both books every month."""
+        state = new_game("Sit", seed=7)
+        loans0 = LN.total_loans(state["bank"]["loans"])
+        deps0 = L.total_deposits(state["bank"]["ledger"])
+        prev_l, prev_d = loans0, deps0
+        loan_downs = dep_downs = 0
+        last_m = None
+        seen = 0
+        while seen < 12:
+            engine.step_day(state)
+            for ev in list(state["events"]["pending"]):
+                if ev.get("type") == "overnight_shortfall":
+                    try:
+                        engine.perform_action(state, "event_choice",
+                                              {"event_id": ev["id"],
+                                               "choice": "wait"})
+                    except engine.ActionError:
+                        state["events"]["pending"] = [
+                            e for e in state["events"]["pending"]
+                            if e["id"] != ev["id"]]
+                elif ev.get("blocking"):
+                    state["events"]["pending"] = [
+                        e for e in state["events"]["pending"]
+                        if e["id"] != ev["id"]]
+            if state["bank"]["ledger"]["months"]:
+                m = state["bank"]["ledger"]["months"][-1]["month"]
+                if m != last_m:
+                    last_m = m
+                    seen += 1
+                    lo = LN.total_loans(state["bank"]["loans"])
+                    de = L.total_deposits(state["bank"]["ledger"])
+                    if lo < prev_l - 50_000_00:
+                        loan_downs += 1
+                    if de < prev_d - 50_000_00:
+                        dep_downs += 1
+                    prev_l, prev_d = lo, de
+            if state["game_over"]:
+                break
+        self.assertIsNone(state["game_over"])
+        self.assertGreaterEqual(LN.total_loans(state["bank"]["loans"]),
+                                int(loans0 * 0.97))
+        self.assertGreaterEqual(L.total_deposits(state["bank"]["ledger"]),
+                                int(deps0 * 0.97))
+        self.assertLessEqual(loan_downs, 3, "loan book shrank %d of 12 months"
+                             % loan_downs)
+        self.assertLessEqual(dep_downs, 4, "deposits shrank %d of 12 months"
+                             % dep_downs)
+        self.assertEqual(L.trial_balance(state["bank"]["ledger"]), 0)
 
     def test_overnight_fhlb_is_three_months(self):
         state = new_game("Term", seed=5)

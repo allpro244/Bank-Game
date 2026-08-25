@@ -77,6 +77,12 @@ def new_game(name="First National Bank of Caprock", seed=12345,
     GOALS.attach(state, goal)
     _seed_first_credit(state)
     bank["cached_assets"] = L.total_assets(bank["ledger"])
+    state["meta"]["opening"] = {
+        "assets": bank["cached_assets"],
+        "deposits": L.total_deposits(bank["ledger"]),
+        "loans": loans.total_loans(bank["loans"]),
+        "equity": L.total_equity(bank["ledger"]),
+    }
     from .regulation import capital_ratios, pca_category
     r = capital_ratios(state)
     state["regulation"]["last_ratios"] = {k: (round(v, 5) if isinstance(v, float) else v)
