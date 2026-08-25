@@ -29,6 +29,19 @@ class TestPlayerUI(unittest.TestCase):
         self.assertLess(app["counter_preview"]["amount"], app["amount"])
         self.assertIn("participate_preview", app)
 
+    def test_first_digest_shows_real_book_flows(self):
+        g = Game()
+        g.state = new_game("UI", seed=7)
+        g.state["bank"]["funding"]["overnight_policy"] = "auto"
+        g.state["bank"]["loans"]["queue"].clear()
+        from bankgame.sim import engine
+        for _ in range(32):
+            engine.step_day(g.state)
+            g.state["events"]["pending"].clear()
+        d = g.state["digests"][-1]
+        self.assertGreater(d["loan_flow"], 0)
+        self.assertNotEqual(d["dep_flow"], 0)
+
     def test_markets_section_has_grouped_previews(self):
         g = Game()
         g.state = new_game("UI", seed=1)

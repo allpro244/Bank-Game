@@ -500,8 +500,12 @@ def compose_digest(state):
         "display": display_date(state),
         "econ": econ_line,
         "ni": ni,
-        "dep_flow": int(m.get("deposits", 0) - prev.get("deposits", m.get("deposits", 0))),
-        "loan_flow": int(m.get("loans", 0) - prev.get("loans", m.get("loans", 0))),
+        "dep_flow": int(m.get("deposits", 0) - (
+            prev["deposits"] if prev and "deposits" in prev
+            else (state.get("meta") or {}).get("opening", {}).get("deposits", 0))),
+        "loan_flow": int(m.get("loans", 0) - (
+            prev["loans"] if prev and "loans" in prev
+            else (state.get("meta") or {}).get("opening", {}).get("loans", 0))),
         "cet1": m.get("cet1_ratio"),
         "ldr": m.get("loan_to_deposit"),
         "local": local,

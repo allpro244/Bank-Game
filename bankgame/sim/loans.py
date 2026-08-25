@@ -1079,6 +1079,46 @@ def credit_box_action(state, app):
     return "stop"
 
 
+def _spendable_cash(state):
+    b = state["bank"]["ledger"]["balances"]
+    return b["1000"] + b["1010"] + b["1100"]
+
+
+def _opex_reserve(state):
+    """Cash to leave for this morning's payroll, rent, and tech."""
+    from . import operations as OPS
+    ops = state["bank"]["ops"]
+    sal = 0
+    for r in OPS.ROLES:
+        s = ops["staff"][r]
+        sal += int(s["count"] * s["salary"] * ops.get("salary_multiplier", 1)
+                   * (1 + 0.06 * (s["skill"] - 2)) / 12)
+    sal = int(sal * 1.38)
+    occ = sum(b.get("monthly_cost") or 0 for b in ops["branches"] if b.get("open"))
+    assets = max(state["bank"].get("cached_assets") or 20_000_000_00,
+                 20_000_000_00)
+    tech = int(assets * 0.0016 / 12)
+    other = int(assets * 0.0094 / 12) + 9_000_00
+    # Slack for marketing, quarterly FDIC, and a deposit outflow the
+    # same morning. Without it, sit-still still trips overnight.
+    return sal + occ + tech + other + 80_000_00
+
+
+def _origination_budget(state, paydowns):
+    """Notes we can fund today without stealing payroll or running the book off.
+
+    Wait means replace what just paid off. It does not mean originate a
+    quarter of demand into an empty vault, then do it again next month.
+    """
+    budget = max(0, _spendable_cash(state) - _opex_reserve(state))
+    if state["bank"]["funding"].get("shrink_originations"):
+        if paydowns > 0:
+            budget = min(budget, paydowns)
+        else:
+            budget = 0
+    return budget
+
+
 def originate_month(state, rng):
     bank = state["bank"]
     cfg = bank["loans"]
@@ -1103,17 +1143,8 @@ def originate_month(state, rng):
         funding_mult = max(0.22, 1.0 - (ldr - 0.92) * 8.0)
     else:
         funding_mult = max(0.02, 0.22 - (ldr - 1.00) * 2.0)
-    cash = (bank["ledger"]["balances"]["1000"]
-            + bank["ledger"]["balances"]["1010"]
-            + bank["ledger"]["balances"]["1100"])
-    if cash < max(250_000_00, int(total_before * 0.01)):
-        funding_mult *= 0.35
-    if bank["funding"].get("shrink_originations"):
-        funding_mult *= 0.25
-        # Keep the throttle on until spendable cash is actually back.
-        if cash >= max(250_000_00, int(total_before * 0.01)):
-            bank["funding"]["shrink_originations"] = False
 
+    plans = []
     for market_id in sorted(bank["deposits"]["pools"].keys()):
         region = state["regions"][market_id]
         from .deposits import natural_share
@@ -1151,25 +1182,38 @@ def originate_month(state, rng):
             if my_vol <= 0:
                 continue
             used += my_vol
-            quality = round(1.45 - 0.20 * tight, 3)
-            mix = TIER_MIX[tight]
-            for tier, frac in zip(("A", "B", "C"), mix):
-                amt = int(my_vol * frac)
-                if amt <= 0:
-                    continue
-                rate = offer_rate(state, product, tier, market_id)
-                sold = 0
-                if product == "mortgage" and cfg["mortgage_sale_frac"] > 0:
-                    sold = int(amt * cfg["mortgage_sale_frac"])
-                    amt -= sold
-                    gain = int(sold * 0.015)
-                    if gain > 0:
-                        L.post(bank["ledger"], state["time"]["date"],
-                               "Mortgage banking: loans sold to secondary market",
-                               [["1000", gain, 0], ["4160", 0, gain]], tag="loan")
-                if amt > 0:
-                    book_flow(state, product, market_id, tier, year, amt, rate, quality)
-                    originated[product] = originated.get(product, 0) + amt
+            plans.append((product, market_id, my_vol, tight))
+
+    paydowns = int((cfg.get("month_log") or {}).get("principal") or 0)
+    budget = _origination_budget(state, paydowns)
+    planned = sum(v for _p, _m, v, _t in plans)
+    if planned > budget:
+        if budget <= 0:
+            plans = []
+        else:
+            scale = budget / planned
+            plans = [(p, m, int(v * scale), t) for p, m, v, t in plans]
+
+    for product, market_id, my_vol, tight in plans:
+        quality = round(1.45 - 0.20 * tight, 3)
+        mix = TIER_MIX[tight]
+        for tier, frac in zip(("A", "B", "C"), mix):
+            amt = int(my_vol * frac)
+            if amt <= 0:
+                continue
+            rate = offer_rate(state, product, tier, market_id)
+            sold = 0
+            if product == "mortgage" and cfg["mortgage_sale_frac"] > 0:
+                sold = int(amt * cfg["mortgage_sale_frac"])
+                amt -= sold
+                gain = int(sold * 0.015)
+                if gain > 0:
+                    L.post(bank["ledger"], state["time"]["date"],
+                           "Mortgage banking: loans sold to secondary market",
+                           [["1000", gain, 0], ["4160", 0, gain]], tag="loan")
+            if amt > 0:
+                book_flow(state, product, market_id, tier, year, amt, rate, quality)
+                originated[product] = originated.get(product, 0) + amt
     total_orig = sum(originated.values())
     if total_orig > 0:
         from .funding import ensure_cash
@@ -1181,6 +1225,12 @@ def originate_month(state, rng):
         if fees > 0:
             L.post(bank["ledger"], state["time"]["date"], "Loan origination fees",
                    [["1000", fees, 0], ["4000", 0, fees]], tag="loan")
+    # Lift Wait only when a real cash pile is back — not because this
+    # morning's paydowns briefly sat in the vault before we re-lent them.
+    if bank["funding"].get("shrink_originations"):
+        cash_after = _spendable_cash(state)
+        if cash_after >= max(250_000_00, int(total_loans(cfg) * 0.01)):
+            bank["funding"]["shrink_originations"] = False
     cfg["stats"]["originated_mtd"] = total_orig
     # floating-rate pools reprice with the market
     for p in cfg["pools"]:
