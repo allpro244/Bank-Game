@@ -54,13 +54,10 @@ def preview_branch(state, market_id, quality=2):
     # ensure_cash is mutating — compute affordability without calling it
     can_fund = cash_now >= cost
 
-    already = any(b.get("market") == market_id and b.get("open")
-                  for b in state["bank"]["ops"]["branches"])
-    # Estimate as if we had one more standard branch in this market.
+    already_n = sum(1 for b in state["bank"]["ops"]["branches"]
+                    if b.get("market") == market_id and b.get("open"))
+    already = already_n > 0
     gather = DEP.year1_gather_estimate(state, market_id)
-    if not already:
-        # year1_gather_estimate already pretends presence=1 when score is 0
-        pass
 
     r = capital_ratios(state)
     assets = max(1, r["assets"])
@@ -90,6 +87,7 @@ def preview_branch(state, market_id, quality=2):
         "monthly": monthly,
         "can_fund": can_fund,
         "already": already,
+        "offices": already_n,
         "year1_gather": gather,
         "pool": region["deposit_pool"],
         "proforma_leverage": round(lev, 5),
@@ -128,8 +126,8 @@ def open_branch(state, market_id, quality=2):
     from .funding import ensure_cash
     if ensure_cash(state, cost) < cost:
         return "not enough cash ($%s needed)" % f"{cost // 100:,}"
-    if any(b.get("market") == market_id and b.get("open") for b in ops["branches"]):
-        return "already have a branch in this market"
+    # Second (and later) offices in a served town are allowed. Gather
+    # diminishes via presence_score; the preview says so.
     if state["regulation"].get("growth_cap_active") and len(ops["branches"]) > 2:
         return "growth restrictions under your enforcement action block new branches"
     b = {"id": ops["next_branch_id"], "market": market_id, "open": True,
@@ -147,8 +145,33 @@ def open_branch(state, market_id, quality=2):
     return b
 
 
-def digital_upgrade_cost(level):
-    return int(1_500_000_00 * (1 + level) ** 1.6)
+def digital_upgrade_cost(level, assets=None):
+    """Sticker is $1.5M × (1+level)^1.6. A $20M charter pays a scaled ticket."""
+    sticker = int(1_500_000_00 * (1 + level) ** 1.6)
+    if assets is None:
+        return sticker
+    # $20M pays 22% of sticker; $200M+ pays full.
+    scale = min(1.0, max(0.22, (max(1, assets) / 100) / 200_000_000))
+    return max(250_000_00, int(sticker * scale))
+
+
+def preview_digital(state):
+    bank = state["bank"]
+    ops = bank["ops"]
+    level = ops["digital_level"]
+    if level >= 5:
+        return {"error": "already best-in-class", "maxed": True}
+    assets = max(1, bank.get("cached_assets") or 0)
+    cost = digital_upgrade_cost(level, assets)
+    monthly = 25_000_00
+    equity = L.total_equity(bank["ledger"])
+    tbv = max(1, equity - bank["ledger"]["balances"]["1600"])
+    too_big = cost > int(tbv * 0.07)
+    return {
+        "level": level, "next": level + 1, "cost": cost,
+        "monthly": monthly, "tbv": tbv, "too_big": too_big,
+        "pct_tbv": round(cost / tbv, 4),
+    }
 
 
 def core_upgrade_cost(assets):
@@ -234,7 +257,12 @@ def invest_digital(state):
     ops = bank["ops"]
     if ops["digital_level"] >= 5:
         return "digital platform already best-in-class"
-    cost = digital_upgrade_cost(ops["digital_level"])
+    assets = max(1, bank.get("cached_assets") or 0)
+    cost = digital_upgrade_cost(ops["digital_level"], assets)
+    preview = preview_digital(state)
+    if preview.get("too_big"):
+        return ("this build is %.0f%% of tangible book — raise or wait"
+                % (preview["pct_tbv"] * 100))
     from .funding import ensure_cash
     if ensure_cash(state, cost) < cost:
         return "not enough cash ($%s needed)" % f"{cost // 100:,}"
@@ -295,7 +323,12 @@ def monthly_opex(state, rng):
                [["5110", dep, 0], ["1500", 0, dep]], tag="ops")
 
     assets = max(bank["cached_assets"], 20_000_000_00)
-    tech = int(assets * 0.0026 / 12) + ops["cyber_spend"] \
+    assets_dol = assets / 100
+    # Overhead declines with size so a $1B book is not paying community %
+    # on money-center assets. $20M sits near a real ~3% opex/assets.
+    size_scale = (20_000_000 / max(20_000_000, assets_dol)) ** 0.35
+    tech_rate = 0.0016 * size_scale
+    tech = int(assets * tech_rate / 12) + ops["cyber_spend"] \
         + int(ops["digital_level"] * 25_000_00) + ops["audit_spend"]
     ensure_cash(state, tech)
     L.post(bank["ledger"], date, "Technology, data processing, audit",
@@ -304,7 +337,8 @@ def monthly_opex(state, rng):
     # everything else it takes to run a bank: insurance, legal, supplies,
     # exams, professional fees, franchise taxes. Sized so a passive
     # community book lands near a real 1% ROA, not a 2.5% printer.
-    other = int(assets * 0.0110 / 12) + 12_000_00
+    other_rate = 0.0094 * size_scale
+    other = int(assets * other_rate / 12) + 9_000_00
     ensure_cash(state, other)
     L.post(bank["ledger"], date, "Other operating expense",
            [["5170", other, 0], ["1000", 0, other]], tag="ops")

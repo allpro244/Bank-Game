@@ -88,6 +88,14 @@ def default_config():
         "limits": {p: 0 for p in PRODUCTS},         # cap, % of total loans (0 = none)
         "approval_threshold": 500_000_00,           # manual approval above this
         "auto_policy": "queue",                     # queue | approve_ab | decline
+        "credit_box": {
+            "enabled": False,
+            "approve_tiers": ["A", "B"],
+            "counter_tiers": ["C"],
+            "decline_tiers": ["D"],
+            "max_hold": 2_000_000_00,
+            "participate_over": True,
+        },
         "mortgage_sale_frac": 0.0,                  # sell share of new mortgages
         "pools": [],
         "large": [],
@@ -330,8 +338,54 @@ def lender_capacity(state):
     """Monthly origination capacity in cents, from lending staff."""
     staff = state["bank"]["ops"]["staff"]
     lenders = staff["lenders"]
-    per = 1_100_000_00 * (0.6 + 0.2 * lenders["skill"])   # per lender per month
+    # Sized so one opening-skill lender's extra book covers fully-loaded pay.
+    per = 3_600_000_00 * (0.6 + 0.2 * lenders["skill"])
     return int(lenders["count"] * per * max(0.4, lenders["morale"]))
+
+
+def preview_hire_lender(state):
+    """12-month NI of one more lender vs fully-loaded salary. Cents."""
+    staff = state["bank"]["ops"]["staff"]["lenders"]
+    per = 3_600_000_00 * (0.6 + 0.2 * staff["skill"]) * max(0.4, staff["morale"])
+    extra_ni = int(per * 6 * 0.045)   # first-year average book × NIM
+    cost = int(staff["salary"] * state["bank"]["ops"]["salary_multiplier"] * 1.38)
+    return {"extra_ni": extra_ni, "cost": cost, "net": extra_ni - cost,
+            "positive": extra_ni > cost}
+
+
+def credit_box(state):
+    cfg = state["bank"]["loans"]
+    box = cfg.get("credit_box")
+    if not isinstance(box, dict):
+        box = {}
+        cfg["credit_box"] = box
+    box.setdefault("enabled", False)
+    box.setdefault("approve_tiers", ["A", "B"])
+    box.setdefault("counter_tiers", ["C"])
+    box.setdefault("decline_tiers", ["D"])
+    box.setdefault("max_hold", 2_000_000_00)
+    box.setdefault("participate_over", True)
+    return box
+
+
+def credit_box_action(state, app):
+    """What the player's box would do with `app`. 'stop' means it needs them."""
+    box = credit_box(state)
+    if not box["enabled"]:
+        return "stop"
+    tier = app.get("tier")
+    amt = int(app.get("amount") or 0)
+    if tier in box["decline_tiers"]:
+        return "decline"
+    if amt > box["max_hold"]:
+        if box["participate_over"] and tier in box["approve_tiers"] + box["counter_tiers"]:
+            return "participate"
+        return "stop"
+    if tier in box["approve_tiers"]:
+        return "approve"
+    if tier in box["counter_tiers"]:
+        return "counter"
+    return "stop"
 
 
 def originate_month(state, rng):
@@ -352,12 +406,12 @@ def originate_month(state, rng):
     # hard before wholesale quietly fills the hole (the player has to
     # choose FHLB / pay-up / participate — see funding.manage_overnight).
     ldr = total_before / max(1, L.total_deposits(bank["ledger"]))
-    if ldr <= 0.98:
+    if ldr <= 0.92:
         funding_mult = 1.0
-    elif ldr <= 1.05:
-        funding_mult = max(0.35, 1.0 - (ldr - 0.98) * 6.0)
+    elif ldr <= 1.00:
+        funding_mult = max(0.22, 1.0 - (ldr - 0.92) * 8.0)
     else:
-        funding_mult = max(0.05, 0.35 - (ldr - 1.05) * 1.6)
+        funding_mult = max(0.02, 0.22 - (ldr - 1.00) * 2.0)
     cash = (bank["ledger"]["balances"]["1000"]
             + bank["ledger"]["balances"]["1010"]
             + bank["ledger"]["balances"]["1100"])
@@ -450,6 +504,65 @@ def originate_month(state, rng):
 
 # -------------------------------------------------------- large loan queue
 
+def _try_credit_box(state, app):
+    """Apply the player's credit box. True if the memo was handled (not queued)."""
+    action = credit_box_action(state, app)
+    if action == "stop":
+        return False
+    cfg = state["bank"]["loans"]
+    from .funding import ensure_cash
+    if action == "approve":
+        if ensure_cash(state, app["amount"]) < app["amount"]:
+            return False
+        approve_application(state, app, auto=True)
+        cfg["stats"]["approved_apps"] += 1
+        cfg["stats"]["box_handled"] = cfg["stats"].get("box_handled", 0) + 1
+        return True
+    if action == "decline":
+        decline_application(state, app)
+        cfg["stats"]["declined_apps"] += 1
+        cfg["stats"]["box_handled"] = cfg["stats"].get("box_handled", 0) + 1
+        return True
+    if action == "counter":
+        hold = int(app["amount"] * 0.70)
+        if ensure_cash(state, hold) < hold:
+            return False
+        from .rng import Rng
+        rng = Rng(state["rng"]["credit"])
+        res = counter_application(state, app, rng, extra_bp=100, hold_frac=0.70)
+        if res.get("accepted"):
+            cfg["stats"]["countered_apps"] = cfg["stats"].get("countered_apps", 0) + 1
+            cfg["stats"]["approved_apps"] += 1
+        else:
+            cfg["stats"]["declined_apps"] += 1
+        cfg["stats"]["box_handled"] = cfg["stats"].get("box_handled", 0) + 1
+        return True
+    if action == "participate":
+        hold, _sold = participate_hold(app, 0.40)
+        if ensure_cash(state, hold) < hold:
+            return False
+        participate_application(state, app, hold_frac=0.40)
+        cfg["stats"]["participated_apps"] = cfg["stats"].get("participated_apps", 0) + 1
+        cfg["stats"]["approved_apps"] += 1
+        cfg["stats"]["box_handled"] = cfg["stats"].get("box_handled", 0) + 1
+        return True
+    return False
+
+
+def apply_credit_box(state):
+    """Run the box against the current queue. Returns how many were handled."""
+    cfg = state["bank"]["loans"]
+    keep = []
+    n = 0
+    for app in list(cfg["queue"]):
+        if _try_credit_box(state, app):
+            n += 1
+        else:
+            keep.append(app)
+    cfg["queue"] = keep
+    return n
+
+
 def _generate_applications(state, rng):
     bank = state["bank"]
     cfg = bank["loans"]
@@ -467,6 +580,9 @@ def _generate_applications(state, rng):
         for _ in range(min(n, 3)):
             app = _make_application(state, rng, market_id, thr)
             if app is None:
+                continue
+            boxed = _try_credit_box(state, app)
+            if boxed:
                 continue
             policy = cfg["auto_policy"]
             if policy == "approve_ab" and app["tier"] in ("A", "B"):

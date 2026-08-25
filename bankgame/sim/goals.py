@@ -153,6 +153,10 @@ def _progress_bits(state, gid, years):
 
     if gid == "world":
         race = world_race(state)
+        if race.get("empty_field"):
+            bits = ("The map is empty. Biggest-in-the-world needs a living "
+                    "industry — this is a failed world, not a shortcut.")
+            return bits, 0.60 * min(1.0, race["me"] / max(1, WORLD_CROWN))
         if race["beats_rivals"] and race["on_world_table"]:
             bits = "You are #1 of %d and over $250B. The largest on the map." % race["field"]
         elif race["beats_rivals"]:
@@ -266,8 +270,10 @@ def world_race(state):
         "rank": 1 + ahead,
         "field": 1 + len(alive),
         "crown": WORLD_CROWN,
-        "beats_rivals": me > rival_assets,
+        "beats_rivals": me > rival_assets and len(alive) >= 3,
         "on_world_table": me >= WORLD_CROWN,
+        "empty_field": len(alive) < 3,
+        "living": len(alive),
     }
 
 

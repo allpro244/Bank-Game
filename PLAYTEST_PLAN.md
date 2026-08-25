@@ -20,6 +20,10 @@ parked until this pass makes the stated game playable.
 `DESIGN.md` is still the model reference. `ROADMAP.md` stays the index.
 This file is what we build next, in what order, and what “done” means.
 
+**Status (this PR):** I1–I7 are implemented in engine + UI. The $250B
+crown is **not** moved. The 60-year measurement pack is still the next
+gate before anyone touches the default goal.
+
 ---
 
 ## Thesis

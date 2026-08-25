@@ -130,19 +130,96 @@ def market_rates(state, market_id):
     return {"deposit": dep, "loan": loan}
 
 
+MIN_LIVING = 8
+NEW_CHARTER_NAMES = [
+    ("Rio Concho Bank", "relationship"),
+    ("Sierra Blanca State Bank", "conservative"),
+    ("Pecos Valley National", "relationship"),
+    ("Red River Bancshares", "roll_up"),
+    ("Cactus State Bank", "conservative"),
+    ("Llano River Trust", "relationship"),
+    ("High Plains Heritage Bank", "conservative"),
+    ("Brazos Forks Bank", "aggressive_lender"),
+]
+
+
+def living_banks(comp):
+    return [b for b in comp["banks"] if b.get("alive")]
+
+
+def _size_growth_drag(assets_cents):
+    """Money-center names slow toward GDP. Community names may still compound."""
+    assets_b = max(0.01, assets_cents / 100 / 1_000_000_000)
+    return 1.0 / (1.0 + assets_b / 8.0)
+
+
+def _absorb_rival(winner, loser):
+    """Rival–rival merger. Scalars only — no second ledger."""
+    take = int(loser["assets"] * 0.85)
+    w_a = max(1, winner["assets"])
+    winner["assets"] += take
+    winner["npa_ratio"] = round(
+        (winner["npa_ratio"] * w_a + loser["npa_ratio"] * take) / (w_a + take), 5)
+    winner["equity_ratio"] = round(
+        min(0.16, (winner["equity_ratio"] * w_a + 0.07 * take) / (w_a + take)), 5)
+    for m in loser.get("markets") or []:
+        if m not in winner["markets"]:
+            winner["markets"].append(m)
+    loser["alive"] = False
+
+
+def _spawn_charter(state, rng):
+    """A new community bank in a town that has room."""
+    comp = state["competitors"]
+    used = {n for n, _s, _m in BANK_NAMES}
+    used.update(b["name"] for b in comp["banks"])
+    names = [(n, s) for n, s in NEW_CHARTER_NAMES if n not in used]
+    if not names:
+        return None
+    name, strat = rng.choice(names)
+    # Prefer towns with few living rivals.
+    counts = {}
+    for mid in state["regions"]:
+        counts[mid] = sum(1 for b in living_banks(comp) if mid in b.get("markets", []))
+    towns = sorted(counts, key=lambda m: (counts[m], m))[:4]
+    if not towns:
+        return None
+    home = rng.choice(towns)
+    nid = comp.get("next_id", len(comp["banks"]))
+    bank = {
+        "id": "cb%d" % nid, "name": name, "strategy": strat,
+        "markets": [home],
+        "assets": int(rng.uniform(25, 80) * 1_000_000 * 100),
+        "equity_ratio": round(rng.uniform(0.09, 0.12), 4),
+        "npa_ratio": round(rng.uniform(0.003, 0.010), 5),
+        "roa": round(rng.uniform(0.008, 0.012), 5),
+        "nim": round(rng.uniform(0.032, 0.040), 5),
+        "efficiency": round(rng.uniform(0.58, 0.68), 4),
+        "alive": True, "stress": 0.0, "months_weak": 0,
+    }
+    comp["banks"].append(bank)
+    comp["next_id"] = nid + 1
+    return bank
+
+
 def step_month(state, rng):
-    """Update rival balance sheets and health; emit failure/M&A events."""
+    """Update rival balance sheets and health; emit failure/M&A events.
+
+    Failures leave survivors. New charters fill emptied towns. Growth
+    slows with size so Empire does not 9%/yr forever.
+    """
     econ = state["economy"]
     comp = state["competitors"]
     events = []
+    pending_fail = []
     for b in comp["banks"]:
         if not b["alive"]:
             continue
         p = STRAT_PARAMS[b["strategy"]]
         cycle = econ["output_gap"] * 0.001 + (0.004 if not econ["recession"] else -0.006)
-        growth = (p["growth"] * 0.004 + cycle + rng.normal(0, 0.004))
+        raw = p["growth"] * 0.003 + cycle + rng.normal(0, 0.002)
+        growth = min(0.005, raw * _size_growth_drag(b["assets"]))
         b["assets"] = max(10_000_000_00, int(b["assets"] * (1 + growth)))
-        # credit losses scale with stress * risk appetite
         loss_rate = (0.0003 + econ["credit_stress"] * 0.0035 * p["risk"]
                      + max(0.0, rng.normal(0, 0.0006)))
         b["npa_ratio"] = round(max(0.001, min(0.15,
@@ -166,34 +243,76 @@ def step_month(state, rng):
         else:
             b["months_weak"] = max(0, b["months_weak"] - 1)
 
-        # failure
         fail_p = 0.0
         if b["equity_ratio"] < 0.02:
-            fail_p = 0.5
-        elif b["months_weak"] > 4:
-            fail_p = 0.08 + econ["credit_stress"] * 0.2
+            fail_p = 0.08
+        elif b["months_weak"] > 12:
+            fail_p = 0.015 + econ["credit_stress"] * 0.04
         if rng.chance(fail_p):
-            b["alive"] = False
-            comp["failed_log"].append({"name": b["name"], "m": econ["months"]})
-            franchise = _franchise(b, rng)
+            pending_fail.append(b)
+
+    for b in pending_fail:
+        if not b.get("alive"):
+            continue
+        living = living_banks(comp)
+        if len(living) <= MIN_LIVING:
+            # Recap in place — the industry does not mass-extinct.
+            b["equity_ratio"] = max(0.07, b["equity_ratio"])
+            b["months_weak"] = 0
+            b["npa_ratio"] = min(b["npa_ratio"], 0.04)
+            continue
+        peers = [x for x in living if x["id"] != b["id"] and x["assets"] > b["assets"]]
+        if peers and rng.chance(0.65):
+            winner = max(peers, key=lambda x: x["assets"])
+            _absorb_rival(winner, b)
+            comp["failed_log"].append({"name": b["name"], "m": econ["months"],
+                                       "how": "merged"})
             events.append({
-                "type": "fdic_auction", "blocking": True,
-                "title": "BANK FAILURE: %s closed by regulators" % b["name"],
-                "text": ("%s (assets ~$%dM) has been closed and the FDIC is running "
-                         "an assisted auction this weekend. Franchise: about $%dM of "
-                         "deposits, $%dM of loans (to be taken at a %d%% credit mark), "
-                         "and %d branches in %s. You may bid a deposit premium; the "
-                         "FDIC weighs bids and cost to the fund. Rivals will bid too.")
-                        % (b["name"], b["assets"] // 100 // 1_000_000,
-                           franchise["deposits"] // 100 // 1_000_000,
-                           franchise["loans"] // 100 // 1_000_000,
-                           int(franchise["credit_mark"] * 100),
-                           franchise["branches"],
-                           ", ".join(state["regions"][m]["name"] for m in b["markets"]
-                                     if m in state["regions"])),
-                "franchise": franchise, "bank_name": b["name"],
-                "choices": ["bid", "pass"],
+                "type": "rival_merger", "blocking": False,
+                "title": "%s buys %s" % (winner["name"], b["name"]),
+                "text": ("%s absorbed %s. The map consolidated; it did not empty."
+                         % (winner["name"], b["name"])),
             })
+            continue
+        b["alive"] = False
+        comp["failed_log"].append({"name": b["name"], "m": econ["months"],
+                                   "how": "failed"})
+        franchise = _franchise(b, rng)
+        events.append({
+            "type": "fdic_auction", "blocking": True,
+            "title": "BANK FAILURE: %s closed by regulators" % b["name"],
+            "text": ("%s (assets ~$%dM — %.1f× your bank) has been closed and the "
+                     "FDIC is running an assisted auction this weekend. Franchise: "
+                     "about $%dM of deposits, $%dM of loans (to be taken at a %d%% "
+                     "credit mark), and %d branches in %s. You may bid a deposit "
+                     "premium; the FDIC weighs bids and cost to the fund. Rivals "
+                     "will bid too. A franchise more than twice your size is refused."
+                     )
+                    % (b["name"], b["assets"] // 100 // 1_000_000,
+                       b["assets"] / max(1, state["bank"].get("cached_assets") or 1),
+                       franchise["deposits"] // 100 // 1_000_000,
+                       franchise["loans"] // 100 // 1_000_000,
+                       int(franchise["credit_mark"] * 100),
+                       franchise["branches"],
+                       ", ".join(state["regions"][m]["name"] for m in b["markets"]
+                                 if m in state["regions"])),
+            "franchise": franchise, "bank_name": b["name"],
+            "choices": ["bid", "pass"],
+        })
+
+    living_n = len(living_banks(comp))
+    if living_n < 12 and econ["months"] > 0 and econ["months"] % 18 == 0:
+        if rng.chance(0.45):
+            born = _spawn_charter(state, rng)
+            if born:
+                events.append({
+                    "type": "new_charter", "blocking": False,
+                    "title": "New charter: %s" % born["name"],
+                    "text": ("%s opened in %s. The industry still issues charters."
+                             % (born["name"],
+                                state["regions"].get(born["markets"][0], {})
+                                .get("name", born["markets"][0]))),
+                })
     return events
 
 

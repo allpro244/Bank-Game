@@ -154,6 +154,21 @@ async function api(path, body) {
   return j;
 }
 
+function runBanner(run) {
+  run = run || {};
+  if (run.run) {
+    return `<div class="banner red" style="margin-bottom:10px"><b>DEPOSITORS ARE PULLING MONEY.</b>
+      ${esc(run.cause || 'The bank is being run on')}. Day ${run.run_days || 1}
+      · out so far ${fm(run.outflow || 0)}. Pay up, draw FHLB, raise capital — the balances will not wait.</div>`;
+  }
+  if (run.watch) {
+    return `<div class="banner" style="margin-bottom:10px;border-color:var(--warn)">
+      <b>Rumor is rising</b> (${esc(run.cause || 'watch the book')}).
+      Checking is sticky; money market is not. Do not let this become a run.</div>`;
+  }
+  return '';
+}
+
 function toast(msg, isErr) {
   const t = document.createElement('div');
   t.className = 'toastmsg' + (isErr ? ' err' : '');
@@ -185,8 +200,8 @@ async function advance(unit) {
   if (BUSY) return;
   BUSY = true;
   try {
-    let r = await api('/api/advance', { unit });
-    if (r.result && r.result.inbox && (r.result.days || 0) === 0) {
+    let r = await api('/api/advance', { unit, max_days: unit === 'until' ? 1260 : undefined });
+    if (unit !== 'until' && r.result && r.result.inbox && (r.result.days || 0) === 0) {
       const ok = confirm('Your Desk still has a decision. Advance anyway? '
         + 'Unanswered memos will age and may expire.');
       if (ok) r = await api('/api/advance', { unit, skip_inbox: true });
@@ -199,7 +214,10 @@ async function advance(unit) {
     await refresh();
     const evs = r.result.events || [];
     const blocked = evs.some(e => e.blocking);
-    if (r.result.inbox) toast('The clock stopped: something on Your Desk needs a decision first.');
+    if (unit === 'until' && (r.result.days || 0) > 0) {
+      const why = r.result.stopped ? (' Stopped: ' + r.result.stopped + '.') : '';
+      toast('Played ' + r.result.days + ' days to ' + (r.result.date || '') + '.' + why);
+    } else if (r.result.inbox) toast('The clock stopped: something on Your Desk needs a decision first.');
     else if (blocked) toast('The clock stopped: something needs your attention.');
   } catch (e) { toast(String(e), true); }
   finally { BUSY = false; }
@@ -258,11 +276,18 @@ function renderFranchise() {
   if (!el) return;
   const f = SUM.franchise;
   if (!f) { el.innerHTML = ''; return; }
+  const run = f.run || SUM.crisis || {};
+  const runBit = run.run
+    ? `<span class="fbit" style="color:var(--red);font-weight:700">RUN — ${esc(run.cause || 'depositors leaving')}</span>`
+    : (run.watch
+      ? `<span class="fbit" style="color:var(--warn)">Rumor rising (${esc(run.cause || 'watch deposits')})</span>`
+      : '');
   el.innerHTML =
     `<span class="fbit"><b>${esc(f.home)}</b></span>` +
     `<span class="fbit">${esc(f.people)}</span>` +
     `<span class="fbit">${esc(f.cash)}</span>` +
-    `<span class="fbit">${esc(f.exam)}</span>`;
+    `<span class="fbit">${esc(f.exam)}</span>` +
+    runBit;
 }
 
 const TABS = [
@@ -307,7 +332,7 @@ function renderNav() {
      <div class="tab" onclick="showGlossary()"><span>📖 Glossary</span></div>
      <div class="tab" onclick="toggleMode()" title="Owner view: plain language. Banker view: full jargon. Same game.">
        <span>⇄ ${MODE === 'owner' ? 'Owner view' : 'Banker view'}</span></div>
-     <div class="helptip" style="padding:8px 14px;line-height:1.35">Keys: space day · w week · m month · q quarter. Week/month/quarter stop if Your Desk has a decision.</div>`;
+     <div class="helptip" style="padding:8px 14px;line-height:1.35">Keys: space day · w week · m month · q quarter · u play until. Week/month/quarter stop if Your Desk has a decision. Play until uses your credit box.</div>`;
 }
 
 async function switchTab(id) {
@@ -392,6 +417,11 @@ async function tabDesk(m) {
   m.innerHTML = `
     <h2>Your Desk <span class="sub">— what needs you, in plain English. Every light and card clicks through to the full detail.</span></h2>
     ${goalBar}
+    ${runBanner(SUM.crisis)}
+    ${(SUM.franchise && SUM.franchise.exam_path) ? `<div class="banner" style="margin-bottom:10px;border-color:var(--red)">
+      <b>Report card is a ${SUM.franchise.camels}.</b> ${esc(SUM.franchise.exam_path.needed || '')}
+      ${(SUM.franchise.exam_path.actions || []).slice(0, 2).map(a => ' ' + esc(a)).join('')}
+    </div>` : ''}
 
     <div class="gauges">
       ${g.map(x => `
@@ -411,6 +441,10 @@ async function tabDesk(m) {
         Your advisors have nothing urgent. All six lights are green — bank the
         profits, or go make some trouble on the Lending and Markets tabs.</span></div>` : '')}
 
+    <div class="panel tight" style="margin:10px 0">
+      <button class="primary" onclick="advance('until')">Play until something needs you</button>
+      <span class="sub"> — runs the clock. Your credit box (Lending) handles matching memos. Stops on exams, runs, fraud, overnight holes, and anything outside the box.</span>
+    </div>
     <h3>Inbox — decisions waiting on you</h3>
     <div class="panel">
       ${nothingPending ? '<span class="sub">Empty. Advance the clock and the world will bring you problems.</span>' : ''}
@@ -778,7 +812,22 @@ async function tabLending(m) {
       <div class="prevbar" id="prev-lending"></div>
     </div>
     <div class="panel">
-      <h3>Credit policy</h3>
+      <h3>Credit policy box</h3>
+      <div class="helptip">Play until uses this box. It is your policy, not the advisor clicking for you. Memos outside the box still stop the clock.</div>
+      <div class="ctl"><label>Box</label>
+        <select onchange="setPol('loans.credit_box.enabled', this.value === 'true')">
+          <option value="false" ${!(d.credit_box && d.credit_box.enabled)?'selected':''}>Off — every large credit comes to the desk</option>
+          <option value="true" ${d.credit_box && d.credit_box.enabled?'selected':''}>On — approve A/B, counter C, participate if over the hold</option>
+        </select></div>
+      <div class="ctl"><label>Max hold $</label>
+        <input type="number" id="box-hold" value="${((d.credit_box && d.credit_box.max_hold) || 200000000) / 100}">
+        <button class="small" onclick="setPol('loans.credit_box.max_hold', moneyIn('box-hold'))">Set</button></div>
+      <div class="ctl"><label>If over the hold</label>
+        <select onchange="setPol('loans.credit_box.participate_over', this.value === 'true')">
+          <option value="true" ${!(d.credit_box) || d.credit_box.participate_over !== false ? 'selected' : ''}>Participate — keep a slice, sell the rest</option>
+          <option value="false" ${d.credit_box && d.credit_box.participate_over === false ? 'selected' : ''}>Stop the clock — I want the memo</option>
+        </select></div>
+      <h3>Manual approval</h3>
       <div class="ctl"><label>Manual approval above $</label>
         <input type="number" id="apthr" value="${d.approval_threshold / 100}">
         <button class="small" onclick="setPol('loans.approval_threshold', moneyIn('apthr'))">Set</button></div>
@@ -798,10 +847,12 @@ async function tabLending(m) {
         of an estimated ${fm(d.mortgage_preview.est_month_orig)} next month:
         sell ${fm(d.mortgage_preview.sold)}, keep ${fm(d.mortgage_preview.kept)},
         gain about ${fm(d.mortgage_preview.gain)}.</div>` : ''}
+      ${d.hire_preview ? `<div class="sub" style="margin-top:8px">Another lender: first-year book NI about ${fm(d.hire_preview.extra_ni)} vs fully-loaded pay ${fm(d.hire_preview.cost)} — ${d.hire_preview.positive ? 'covers the seat' : 'loses money at this scale'}.</div>` : ''}
       <div class="sub" style="margin-top:6px">Approved: ${d.stats.approved_apps}
         · declined: ${d.stats.declined_apps}
         · countered: ${d.stats.countered_apps || 0}
-        · participated: ${d.stats.participated_apps || 0}</div>
+        · participated: ${d.stats.participated_apps || 0}
+        · box handled: ${d.stats.box_handled || 0}</div>
 
       <h3>OREO (foreclosed real estate)</h3>
       ${d.oreo.length ? `<table><tr><th>Market</th><th class="r">Carrying value</th><th class="r">Months held</th></tr>
@@ -910,6 +961,7 @@ async function tabDeposits(m) {
   const hot = ['money_market', 'cd_1y', 'checking'];
   m.innerHTML = `
     <h2>Deposits</h2>
+    ${runBanner(d.run || SUM.crisis)}
     <div class="panel">
       <p class="stance">${esc(depositStance(d))}</p>
       <h3>The products that move</h3>
@@ -1080,7 +1132,7 @@ async function tabTreasury(m) {
       </div>
       <div class="ctl" style="margin-top:8px"><label>Raise common $</label>
         <input type="number" id="cap-amt" value="2000000">
-        <button class="small" onclick="act('raise_common', {amount: moneyIn('cap-amt')})">Raise</button></div>
+        <button class="small" onclick="confirmRaiseCommon()">Raise</button></div>
       <div class="ctl"><label>Issue preferred $</label>
         <input type="number" id="pref-amt" value="2000000">
         <button class="small" onclick="act('issue_preferred', {amount: moneyIn('pref-amt')})">Issue</button></div>
@@ -1151,6 +1203,7 @@ async function tabOps(m) {
           <option value="false" ${d.auto_backfill === false ? 'selected' : ''}>No (shrink by attrition)</option>
         </select></div>
       <div class="helptip">Lenders drive loan volume. Compliance keeps examiners calm. Underpaid people quit; your best lender can defect with their book.</div>
+      ${d.hire_preview ? `<div class="sub">Another lender: first-year NI about ${fm(d.hire_preview.extra_ni)} vs pay ${fm(d.hire_preview.cost)} — ${d.hire_preview.positive ? 'covers the seat' : 'loses money at this scale'}.</div>` : ''}
 
       <h3>Technology</h3>
       <div class="ctl"><button class="small primary" onclick="confirmDigital()">Upgrade digital (level ${d.digital_level + 1} · ${fm(d.digital_next_cost || 0)})</button>
@@ -1223,7 +1276,7 @@ function branchOptions(d) {
     if (!rows.length) return '';
     return `<optgroup label="${esc(KIND_LABELS[k] || k)}">${rows.map(([mid, mk]) => {
       const p = (d.previews || {})[mid] || {};
-      const tag = p.already ? ' — already open'
+      const tag = p.already ? ' — another office'
         : p.verdict === 'cannot_fund' ? ' — cannot fund'
         : p.verdict === 'lethal' ? ' — capital event'
         : p.verdict === 'stretch' ? ' — stretch' : '';
@@ -1243,12 +1296,15 @@ function showBranchPreview() {
   const lev = ((p.proforma_leverage || 0) * 100).toFixed(1);
   const vtxt = VERDICT_TEXT[p.verdict] || p.verdict;
   box.innerHTML =
-    `${esc(p.name)}: open ${fm(p.cost)}, ${fm(p.monthly)}/mo, year-1 gather ≈ ${fm(p.year1_gather)}. `
+    `${esc(p.name)}${p.offices ? ' (' + p.offices + ' office' + (p.offices > 1 ? 's' : '') + ' now)' : ''}: `
+    + `open ${fm(p.cost)}, ${fm(p.monthly)}/mo, year-1 incremental gather ≈ ${fm(p.year1_gather)}. `
     + `Pro-forma leverage ${lev}% (${esc(vtxt)}).`;
   box.className = 'prevbar' + (p.verdict === 'lethal' || p.verdict === 'cannot_fund' ? ' neg' : '');
   if (btn) {
-    btn.disabled = !p.can_fund || p.already;
-    btn.textContent = p.already ? 'Already open' : (p.can_fund ? 'Review & open' : 'Cannot fund');
+    btn.disabled = !p.can_fund;
+    btn.textContent = p.can_fund
+      ? (p.already ? 'Review & open another' : 'Review & open')
+      : 'Cannot fund';
   }
 }
 
@@ -1270,7 +1326,7 @@ function marketGroups(d) {
       ${rows.map(([mid, r]) => {
         const p = (d.previews || {})[mid] || {};
         const verdict = r.my_branches
-          ? 'You already have a branch.'
+          ? 'Another office is allowed (diminishing gather).'
           : (VERDICT_TEXT[p.verdict] || p.verdict || '');
         return `<tr>
           <td title="${esc(r.note)}">${esc(r.name)}</td>
@@ -1278,9 +1334,7 @@ function marketGroups(d) {
           <td class="r ${r.my_share > 0 ? 'pos' : ''}">${pct(r.my_share, 1)}</td>
           <td class="r">${pct(r.ceiling_25m, 2)}</td>
           <td class="sub">${esc(verdict)}</td>
-          <td>${r.my_branches
-            ? '<span class="pill b">Open</span>'
-            : `<button class="small" onclick="openMarketPreview('${esc(mid)}')">Open preview</button>`}</td>
+          <td><button class="small" onclick="openMarketPreview('${esc(mid)}')">${r.my_branches ? 'Another office' : 'Open preview'}</button></td>
         </tr>`;
       }).join('')}
       </table>`;
@@ -1302,7 +1356,7 @@ function openMarketPreview(mid) {
         <span class="v">${((p.proforma_leverage || 0) * 100).toFixed(1)}%</span></div>
       <p class="moved">${esc(vtxt)}</p>
     </div>`;
-  const btns = p.can_fund && !p.already
+  const btns = p.can_fund
     ? [['Open this branch', `closeText();act('open_branch',{market:${JSON.stringify(mid)}})`,
         (p.verdict === 'lethal' || p.verdict === 'stretch') ? 'danger' : 'primary']]
     : [];
@@ -1319,9 +1373,31 @@ function confirmFire(role, count) {
 }
 function confirmDigital() {
   const d = SEC.ops || {};
-  const ok = confirm('Upgrade digital for ' + fm(d.digital_next_cost || 0)
-    + '? That is an expense, not an asset — it leaves the vault.');
+  const p = d.digital_preview || {};
+  if (p.maxed) { toast('Digital is already best-in-class.'); return; }
+  if (p.too_big) {
+    toast('This build is ' + Math.round((p.pct_tbv || 0) * 100)
+      + '% of tangible book — raise or wait.', true);
+    return;
+  }
+  const ok = confirm('Upgrade digital for ' + fm(p.cost || d.digital_next_cost || 0)
+    + '? Monthly run-rate goes up about ' + fm(p.monthly || 2500000)
+    + '. That is an expense, not an asset — it leaves the vault.');
   if (ok) act('invest_digital');
+}
+
+async function confirmRaiseCommon() {
+  const amt = moneyIn('cap-amt');
+  if (!amt) return;
+  try {
+    const r = await api('/api/action', { action: 'preview_raise_common', payload: { amount: amt } });
+    const t = r.result || {};
+    const ok = confirm('Raise ' + fm(amt) + ' of common at ' + (t.price_to_book || '?')
+      + '× book (' + (t.shares_issued || 0).toLocaleString() + ' shares, '
+      + fm(t.fees || 0) + ' fee). Pro-forma CET1 '
+      + ((t.proforma_cet1 || 0) * 100).toFixed(1) + '%. Proceed?');
+    if (ok) act('raise_common', { amount: amt });
+  } catch (e) { toast(String(e), true); }
 }
 function confirmCore() {
   const d = SEC.ops || {};
@@ -1339,10 +1415,6 @@ function confirmOpenBranch(market, source) {
   const src = source || 'ops';
   const p = ((SEC[src] || SEC.ops || {}).previews || {})[mid];
   if (!p) return;
-  if (p.already) {
-    toast('You already have a branch in ' + (p.name || mid) + '.', true);
-    return;
-  }
   if (!p.can_fund) {
     toast('Not enough cash to open this branch ($' + Math.round(p.cost / 100).toLocaleString() + ' needed).', true);
     return;
@@ -1384,6 +1456,10 @@ async function tabRisk(m) {
       ${card(dt('cra'), d.cra, '', d.cra === 'Needs to Improve' ? 'neg' : 'pos')}
     </div>
     ${d.orders.length ? `<div class="banner amber">Active enforcement: ${esc(d.orders.join(' · '))}</div>` : ''}
+    ${d.exam_path ? `<div class="banner" style="border-color:${camels.composite >= 4 ? 'var(--red)' : 'var(--warn)'}">
+      <b>${esc(d.exam_path.needed || '')}</b>
+      ${(d.exam_path.actions || []).map(a => `<div class="sub">${esc(a)}</div>`).join('')}
+    </div>` : ''}
     ${d.thresholds.durbin ? '<div class="sub">Regulatory tier: ' +
       ['$10B+ (Durbin/CFPB)', d.thresholds.enhanced ? '$50B+ (stress tests)' : '',
        d.thresholds.lcr ? '$100B+ (LCR)' : '', d.thresholds.gsib ? 'G-SIB' : '']
@@ -2086,6 +2162,7 @@ document.addEventListener('keydown', e => {
   else if (e.key === 'w') advance('week');
   else if (e.key === 'm') advance('month');
   else if (e.key === 'q') advance('quarter');
+  else if (e.key === 'u') advance('until');
 });
 
 refresh().catch(e => {

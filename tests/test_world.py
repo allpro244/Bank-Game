@@ -59,8 +59,8 @@ class TestWorld(unittest.TestCase):
 
     def test_25m_ceiling_is_tiny_in_dallas(self):
         state = new_game("Ceil", seed=3)
-        cap = DEP.size_share_cap(state, "dallas", 25_000_000_00)
-        self.assertLess(cap, 0.003)
+        cap = DEP.share_of_full_pool(state, "dallas", extra_offices=1, maturity=1.0)
+        self.assertLess(cap, 0.001)
         home = DEP.size_share_cap(state, "caprock", 25_000_000_00)
         self.assertGreater(home, cap)
 

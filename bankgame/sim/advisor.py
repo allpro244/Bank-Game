@@ -290,13 +290,19 @@ def _r_capital_repair(state):
     r = REG.capital_ratios(state)
     shortfall = int(max(0, 0.09 * r["rwa"] - r["cet1"]) * 1.1)
     amount = max(1_000_000_00, (shortfall // 50_000_00) * 50_000_00)
+    terms = FUND.preview_raise_common(state, amount)
+    if isinstance(terms, str):
+        return None
     return _card(
         "capital_repair", 2, "Raise capital before regulators force you to",
         "You are %s-capitalized. Below 'well-capitalized', doors close: no "
         "brokered deposits, no buybacks, and the next stop is forced "
-        "restrictions. Selling about %s of new stock would restore a "
-        "comfortable cushion. It's dilutive and it stings — less than a "
-        "seizure does." % (reg["pca"], _fm(amount)),
+        "restrictions. Selling about %s of new stock at %.2fx book "
+        "(%s shares, %s fee) would restore a comfortable cushion — "
+        "pro-forma CET1 %.1f%%. It's dilutive and it stings — less than a "
+        "seizure does." % (reg["pca"], _fm(amount), terms["price_to_book"],
+                           f"{terms['shares_issued']:,}", _fm(terms["fees"]),
+                           terms["proforma_cet1"] * 100),
         "Capital is the layer of your own money that absorbs losses before "
         "depositors are at risk. Regulators grade you on it constantly "
         "(see the Risk & Reg tab).",
@@ -385,16 +391,19 @@ def _r_hire_lender(state):
     # cannot book just burns salary.
     if ldr > 1.05 or cash < 400_000_00:
         return None
+    preview = LN.preview_hire_lender(state)
+    if not preview["positive"]:
+        return None
     lenders = bank["ops"]["staff"]["lenders"]
     sal = int(lenders["salary"] * bank["ops"]["salary_multiplier"])
     return _card(
         "hire_lender", 1, "Your lenders are maxed out",
         "Loan production is running at %.0f%% of what your %d lender%s can "
-        "handle — demand you can't write is walking to competitors, and "
-        "overworked lenders quit. Another lender costs about %s a year and "
-        "typically produces several times that in interest income."
+        "handle. Another lender costs about %s a year and the first-year "
+        "book they write is worth about %s of interest — net %s. That is "
+        "why this card is here."
         % (util * 100, lenders["count"], "s" if lenders["count"] != 1 else "",
-           _fm(sal)),
+           _fm(sal), _fm(preview["extra_ni"]), _fm(preview["net"])),
         "Lender headcount is a hard cap on monthly loan originations "
         "(Operations tab). Skill and morale scale each lender's capacity.",
         "ops",
@@ -684,10 +693,105 @@ def _r_exam_prep(state):
         [_goto("Open Risk & Reg", "risk")])
 
 
+def _r_camels_repair(state):
+    cam = state["regulation"]["camels"]["composite"]
+    if cam < 4:
+        return None
+    adv = REG.exam_recovery_advice(state)
+    body = adv["needed"] + " " + " ".join(adv["actions"][:3])
+    return _card(
+        "camels_repair", 2, "Your report card is a %d — here is the way out" % cam,
+        body,
+        "Composite is max(average, worst−1). Fix the floor component and "
+        "the next exam can move. M&A stays closed until you are a 1 or 2.",
+        "risk",
+        [_goto("Open Risk & Reg", "risk")])
+
+
+def _r_open_second_office(state):
+    """I3d / I7: a second window in the home town, only when the preview is fundable."""
+    open_br = [b for b in state["bank"]["ops"]["branches"] if b.get("open")]
+    if len(open_br) != 1:
+        return None
+    if not state["metrics"] or not state["metrics"][-1].get("earnings_ready"):
+        return None
+    home = open_br[0].get("market") or (state.get("meta") or {}).get("home", "caprock")
+    from .operations import preview_branch
+    prev = preview_branch(state, home)
+    if prev.get("error") or prev.get("verdict") in ("cannot_fund", "lethal"):
+        return None
+    if prev.get("year1_gather", 0) <= 0:
+        return None
+    return _card(
+        "open_second_office", 0, "A second window in town",
+        "A second office in %s would add about %s of deposits in year one "
+        "for a %s build (%s/mo). Same town, extra tellers — not a new market. "
+        "The extra window shares the trade-area pool, so gather is smaller "
+        "than the first office."
+        % (prev["name"], _fm(prev["year1_gather"]), _fm(prev["cost"]),
+           _fm(prev["monthly"])),
+        "One office per town was a game lock, not a banking rule. Preview "
+        "it on the Operations page before you commit.",
+        "ops",
+        [_act("Open a second %s office" % prev["name"], "open_branch",
+              {"market": home})])
+
+
+def _r_second_county(state):
+    """I7: Verhalen / Plainview remain the intended second county — never Dallas."""
+    open_br = [b for b in state["bank"]["ops"]["branches"] if b.get("open")]
+    if len(open_br) != 1:
+        return None
+    if not state["metrics"] or not state["metrics"][-1].get("earnings_ready"):
+        return None
+    home = open_br[0].get("market") or (state.get("meta") or {}).get("home", "caprock")
+    from .operations import preview_branch
+    for mid in ("verhalen", "plainview", "caprock"):
+        if mid == home or mid not in state["regions"]:
+            continue
+        prev = preview_branch(state, mid)
+        if prev.get("verdict") != "safe":
+            continue
+        return _card(
+            "second_county", 0, "The next county, not a metro",
+            "%s is the intended second county: year-1 gather about %s for a "
+            "%s build. A metro is a capital event — do not open one as your "
+            "second office."
+            % (prev["name"], _fm(prev["year1_gather"]), _fm(prev["cost"])),
+            "Peer towns share your trade area. Metros have a catchment, not "
+            "the whole pool, and still dilute a $20M book.",
+            "ops",
+            [_act("Open %s" % prev["name"], "open_branch", {"market": mid})])
+    return None
+
+
+def _r_digital(state):
+    """I3f / I7: only recommend digital when the preview is not 7% of book."""
+    if not state["metrics"] or not state["metrics"][-1].get("earnings_ready"):
+        return None
+    from .operations import preview_digital
+    p = preview_digital(state)
+    if p.get("error") or p.get("too_big") or p.get("maxed"):
+        return None
+    if p.get("level", 0) > 0:
+        return None
+    return _card(
+        "digital", 0, "Digital banking at a size that fits",
+        "Level 1 costs %s (%.1f%% of tangible book) and about %s a month "
+        "thereafter. That is an expense, not an asset — it leaves the vault. "
+        "The button is disabled when the ticket is over 7%% of book."
+        % (_fm(p["cost"]), p["pct_tbv"] * 100, _fm(p["monthly"])),
+        "Digital reach is real, but a $1.5M sticker on a $20M charter was "
+        "the 'grow now' suicide. The cost now scales with assets.",
+        "ops",
+        [_act("Upgrade digital", "invest_digital", {})])
+
+
 _RULES = [
-    _r_run_defense, _r_capital_repair, _r_rate_risk, _r_bsa_weak,
+    _r_run_defense, _r_camels_repair, _r_capital_repair, _r_rate_risk, _r_bsa_weak,
     _r_deposit_lag, _r_funding_stretch, _r_sell_mortgages, _r_late_cycle, _r_recession_cre,
-    _r_hire_lender, _r_excess_cash, _r_uninsured_watch, _r_exam_prep,
+    _r_hire_lender, _r_second_county, _r_open_second_office, _r_digital,
+    _r_excess_cash, _r_uninsured_watch, _r_exam_prep,
     _r_fraud_weak, _r_core_old, _r_brand_decay, _r_hoarding,
 ]
 

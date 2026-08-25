@@ -13,8 +13,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from .store import Store
 from .sim import engine, ledger as L, statements, securities, competitors
 from .sim import deposits as DEP, loans as LN, regulation as REG, funding as FUND
-from .sim import fraud as FR
+from .sim import fraud as FR, crises as CRI
 from .sim import advisor as ADV
+from .sim import operations as OPS
 from .sim.newgame import new_game
 from .sim import goals as GOALS
 
@@ -110,7 +111,8 @@ class Game:
                 "conf": econ["consumer_confidence"], "cattle": econ["cattle"],
                 "cotton": econ["cotton"], "natgas": econ["natgas"],
             },
-            "crisis": {"rumor": s["crisis"]["rumor"],
+            "crisis": {**CRI.run_status(s),
+                       "rumor": s["crisis"]["rumor"],
                        "run_active": s["crisis"]["run_active"],
                        "run_days": s["crisis"]["run_days"]},
             "peer_avg": ADV.peer_averages(s),
@@ -125,6 +127,11 @@ class Game:
                 "people": people, "lenders": lenders,
                 "cash": cash_stance, "liquidity_ratio": lr,
                 "exam": exam_line, "months_to_exam": exam_mo,
+                "run": CRI.run_status(s),
+                "camels": s["regulation"]["camels"]["composite"],
+                "exam_path": (REG.exam_recovery_advice(s)
+                              if s["regulation"]["camels"]["composite"] >= 4
+                              else None),
             },
             "unlock": {
                 "months_closed": len(s["metrics"]),
@@ -177,6 +184,8 @@ class Game:
                 "stats": bank["loans"]["stats"],
                 "mortgage_preview": LN.mortgage_sale_preview(s),
                 "relationships": bank["loans"].get("relationships", [])[-20:],
+                "credit_box": LN.credit_box(s),
+                "hire_preview": LN.preview_hire_lender(s),
             }
 
         if name == "deposits":
@@ -202,6 +211,7 @@ class Game:
                 "cost_of_deposits": DEP.cost_of_deposits(s),
                 "uninsured": DEP.uninsured_share(s),
                 "brokered": bank["funding"]["brokered"],
+                "run": CRI.run_status(s),
             }
 
         if name == "treasury":
@@ -235,6 +245,7 @@ class Game:
                 "dividend_payout": bank["policies"]["dividend_payout"],
                 "aoci": -ledger["balances"]["3200"],
                 "overnight_policy": bank["funding"].get("overnight_policy", "ask"),
+                "raise_preview": FUND.preview_raise_common(s, 2_000_000_00),
             }
 
         if name == "ops":
@@ -264,7 +275,9 @@ class Game:
                 "previews": previews,
                 "kind_order": list(OPS.KIND_ORDER),
                 "digital_next_cost": OPS.digital_upgrade_cost(
-                    bank["ops"]["digital_level"]),
+                    bank["ops"]["digital_level"], bank["cached_assets"]),
+                "digital_preview": OPS.preview_digital(s),
+                "hire_preview": LN.preview_hire_lender(s),
                 "core_cost": OPS.core_upgrade_cost(bank["cached_assets"]),
             }
 
@@ -277,6 +290,9 @@ class Game:
                 "capital": {k: v for k, v in ratios.items()},
                 "pca": s["regulation"]["pca"],
                 "camels": s["regulation"]["camels"],
+                "exam_path": (REG.exam_recovery_advice(s)
+                              if s["regulation"]["camels"]["composite"] >= 3
+                              else None),
                 "orders": s["regulation"]["orders"],
                 "cra": s["regulation"]["cra"],
                 "months_to_exam": s["regulation"]["months_to_exam"],
@@ -541,11 +557,14 @@ class Handler(BaseHTTPRequestHandler):
                     if GAME.state is None:
                         return self._json({"error": "no game"}, 400)
                     skip = bool(body.get("skip_inbox"))
-                    res = engine.advance(GAME.state, unit, skip_inbox=skip)
+                    md = body.get("max_days")
+                    res = engine.advance(GAME.state, unit, skip_inbox=skip,
+                                         max_days=int(md) if md else None)
                     GAME.store.snapshot(GAME.state)
                 return self._json({"ok": True, "result":
                                    {"days": res["days"], "date": res["date"],
                                     "inbox": bool(res.get("inbox")),
+                                    "stopped": res.get("stopped"),
                                     "events": [{"id": e["id"], "title": e["title"],
                                                 "blocking": e.get("blocking", False)}
                                                for e in res["events"]]}})

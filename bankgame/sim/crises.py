@@ -14,13 +14,55 @@ from . import ledger as L
 from .deposits import PRODUCTS, ACCT, uninsured_share
 
 # products ranked by how fast that money runs
-RUN_SPEED = {"money_market": 1.6, "cd_3m": 0.9, "checking": 0.9, "checking_int": 0.9,
+RUN_SPEED = {"money_market": 1.6, "cd_3m": 0.9, "checking": 0.35, "checking_int": 0.40,
              "savings": 0.7, "cd_1y": 0.45, "cd_2y": 0.3, "cd_5y": 0.2}
 
 
 def new_crisis():
     return {"rumor": 0.0, "run_active": False, "run_days": 0,
             "total_run_outflow": 0, "worst_day": 0, "history": []}
+
+
+def run_cause(state):
+    """Why rumor is up, in one owner sentence."""
+    bank = state["bank"]
+    reg = state["regulation"]
+    ratios = reg.get("last_ratios") or {}
+    te = ratios.get("tang_equity_ratio")
+    bits = []
+    if te is not None and te < 0.08:
+        bits.append("thin capital")
+    equity = max(1, L.total_equity(bank["ledger"]))
+    unreal = min(0, bank.get("cached_htm_unrealized", 0)) + \
+        min(0, -bank["ledger"]["balances"]["3200"])
+    if unreal < 0 and (-unreal / equity) > 0.08:
+        bits.append("bond marks vs equity")
+    if uninsured_share(state) > 0.28:
+        bits.append("a lot of uninsured money")
+    if reg["camels"]["composite"] >= 4:
+        bits.append("a 4-rated exam")
+    recent = sum(1 for f in state["competitors"]["failed_log"]
+                 if state["economy"]["months"] - f["m"] <= 3)
+    if recent:
+        bits.append("other banks just failed")
+    if not bits:
+        bits.append("word on the street")
+    return bits[0] if len(bits) == 1 else (bits[0] + " and " + bits[1])
+
+
+def run_status(state):
+    """Payload for Deposits / Desk / franchise. No mutation."""
+    cr = state.get("crisis") or {}
+    rumor = float(cr.get("rumor") or 0.0)
+    active = bool(cr.get("run_active"))
+    return {
+        "run": active,
+        "watch": (not active) and rumor > 0.25,
+        "rumor": round(rumor, 3),
+        "run_days": int(cr.get("run_days") or 0),
+        "outflow": int(cr.get("total_run_outflow") or 0),
+        "cause": run_cause(state) if (active or rumor > 0.25) else "",
+    }
 
 
 def social_media_factor(state):
