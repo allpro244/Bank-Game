@@ -189,6 +189,18 @@ class Game:
                 "credit_box": LN.credit_box(s),
                 "hire_preview": LN.preview_hire_lender(s),
                 "loan_sales": LN.sellable_strips(s),
+                "month_book": bank["loans"].get("last_month_book"),
+                "mix": LN.product_mix(s),
+                "stances": {p: LN.infer_stance(bank["loans"], p)
+                            for p in bank["products_enabled"]},
+                "tape": LN.loan_tape(
+                    s,
+                    product=args.get("tape_product", [None])[0] or None,
+                    status=args.get("tape_status", [None])[0] or None,
+                    market=args.get("tape_market", [None])[0] or None,
+                    offset=int((args.get("tape_offset") or [0])[0] or 0),
+                    limit=int((args.get("tape_limit") or [80])[0] or 80),
+                ),
             }
 
         if name == "deposits":
