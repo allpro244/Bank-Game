@@ -141,5 +141,77 @@ class TestCredit(unittest.TestCase):
                                    0.50)
 
 
+class TestSeasonedLoanSale(unittest.TestCase):
+    def test_preview_does_not_mutate(self):
+        import copy
+        state = new_game("Prev", seed=5)
+        snap = copy.deepcopy(state["bank"]["ledger"]["balances"])
+        pools = copy.deepcopy(state["bank"]["loans"]["pools"])
+        prev = LN.preview_loan_sale(state, "pool", product="mortgage",
+                                    market="caprock")
+        self.assertIsInstance(prev, dict)
+        self.assertGreaterEqual(prev["par"], LN.MIN_SEASONED_SALE)
+        self.assertTrue(prev["buyer_name"])
+        self.assertIn("Sell", prev["owner"])
+        self.assertEqual(state["bank"]["ledger"]["balances"], snap)
+        self.assertEqual(state["bank"]["loans"]["pools"], pools)
+
+    def test_sale_posts_and_grows_the_rival(self):
+        from bankgame.sim import competitors as C
+        state = new_game("Sell", seed=5)
+        prev = LN.preview_loan_sale(state, "pool", product="mortgage",
+                                    market="caprock", amount=1_500_000_00)
+        self.assertIsInstance(prev, dict)
+        rival = C.find_rival(state, prev["buyer_id"])
+        before_a = rival["assets"]
+        before_l = LN.total_loans(state["bank"]["loans"])
+        cash0 = (state["bank"]["ledger"]["balances"]["1000"]
+                 + state["bank"]["ledger"]["balances"]["1010"]
+                 + state["bank"]["ledger"]["balances"]["1100"])
+        res = engine.perform_action(state, "sell_loans", {
+            "kind": "pool", "product": "mortgage", "market": "caprock",
+            "amount": 1_500_000_00,
+        })
+        self.assertIsInstance(res, dict)
+        self.assertEqual(LN.total_loans(state["bank"]["loans"]),
+                         before_l - 1_500_000_00)
+        cash1 = (state["bank"]["ledger"]["balances"]["1000"]
+                 + state["bank"]["ledger"]["balances"]["1010"]
+                 + state["bank"]["ledger"]["balances"]["1100"])
+        self.assertEqual(cash1 - cash0, prev["price"])
+        self.assertGreater(rival["assets"], before_a)
+        self.assertEqual(L.trial_balance(state["bank"]["ledger"]), 0)
+
+    def test_npl_credit_is_refused(self):
+        state = new_game("NPL", seed=5)
+        state["bank"]["loans"]["large"].append({
+            "id": 701, "name": "Broken CRE LLC", "product": "cre",
+            "market": "caprock", "balance": 800_000_00, "rate": 0.08,
+            "tier": "C", "status": "npl", "age_m": 18, "term_m": 120,
+        })
+        prev = LN.preview_loan_sale(state, "large", loan_id=701)
+        self.assertIsInstance(prev, str)
+        self.assertIn("current", prev.lower())
+
+    def test_tiny_strip_is_refused(self):
+        state = new_game("Tiny", seed=5)
+        prev = LN.preview_loan_sale(state, "pool", product="mortgage",
+                                    market="caprock", amount=50_000_00)
+        self.assertIsInstance(prev, str)
+
+    def test_advisor_does_not_sell_for_you(self):
+        state = new_game("Card", seed=5)
+        state["metrics"] = [{"earnings_ready": True, "loan_to_deposit": 1.12,
+                             "roa": 0.01}]
+        card = advisor._r_sell_seasoned(state)
+        self.assertIsNotNone(card)
+        step = card["actions"][0]["steps"][0]
+        self.assertEqual(step["kind"], "action")
+        self.assertEqual(step["action"], "sell_loans")
+        # Card present is not a sale.
+        before = LN.total_loans(state["bank"]["loans"])
+        self.assertEqual(LN.total_loans(state["bank"]["loans"]), before)
+
+
 if __name__ == "__main__":
     unittest.main()

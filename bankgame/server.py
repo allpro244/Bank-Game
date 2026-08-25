@@ -188,6 +188,7 @@ class Game:
                 "relationships": bank["loans"].get("relationships", [])[-20:],
                 "credit_box": LN.credit_box(s),
                 "hire_preview": LN.preview_hire_lender(s),
+                "loan_sales": LN.sellable_strips(s),
             }
 
         if name == "deposits":

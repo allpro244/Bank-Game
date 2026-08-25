@@ -147,7 +147,7 @@ unfair-death and first-session work (Phases A–E) is shipped. Do not
 start them to avoid finishing A.
 
 - Per-market deposit pricing (offsets by market, promo money). **Shipped.**
-- Loan sales/participations and a securitization shelf.
+- Loan sales/participations and a securitization shelf. **Seasoned sale shipped** (performing strip or named credit → living rival, preview required). No purchase tape. Shelf still parked.
 - Competitor M&A against the player's targets; hostile offers. **Shipped** (hold / pass / 3-month steal).
 - Examiner remediation tracks (MRAs with deadlines). **Shipped.**
 - Duration-matched EVE dashboard with +/-100/200/300bp shocks. **Shipped.**

@@ -855,6 +855,20 @@ async function tabLending(m) {
         · participated: ${d.stats.participated_apps || 0}
         · box handled: ${d.stats.box_handled || 0}</div>
 
+      <h3>Sell a seasoned book</h3>
+      <div class="helptip">A strip you already own, sold to a living rival. New mortgages still use the slider above. This is not a tape — you cannot buy someone else's loans here.</div>
+      ${(d.loan_sales || []).length ? `<table><tr><th>Book</th><th>Town</th><th class="r">Par</th>
+        <th class="r">Price</th><th>Buyer</th><th></th></tr>
+        ${d.loan_sales.map(s => `<tr>
+          <td>${esc(s.label)}</td>
+          <td>${esc(s.market_name || '')}</td>
+          <td class="r">${fm(s.par)}</td>
+          <td class="r ${cls(s.gain)}">${fm(s.price)} <span class="sub">${(s.px_par * 100).toFixed(1)}¢</span></td>
+          <td>${esc(s.buyer_name)}</td>
+          <td><button class="small" onclick='confirmLoanSale(${jattr(s)})'>Review</button></td>
+        </tr>`).join('')}</table>`
+        : '<span class="sub">No performing strip of $250k+ right now.</span>'}
+
       <h3>OREO (foreclosed real estate)</h3>
       ${d.oreo.length ? `<table><tr><th>Market</th><th class="r">Carrying value</th><th class="r">Months held</th></tr>
         ${d.oreo.map(o => `<tr><td>${esc(o.market)}</td><td class="r">${fm(o.value)}</td><td class="r">${o.months_held}</td></tr>`).join('')}</table>`
@@ -865,12 +879,16 @@ async function tabLending(m) {
     <div class="panel" style="margin-top:12px">
       <h3>Large credits on the books</h3>
       ${d.large.length ? `<table><tr><th>Borrower</th><th>Product</th><th>Market</th>
-        <th class="r">Balance</th><th class="r">Rate</th><th>Tier</th><th>Status</th></tr>
+        <th class="r">Balance</th><th class="r">Rate</th><th>Tier</th><th>Status</th><th></th></tr>
         ${d.large.slice().reverse().map(l => `<tr>
           <td>${esc(l.name)}</td><td>${PRODUCT_LABELS[l.product] || l.product}</td>
           <td>${esc(l.market_name || l.market)}</td><td class="r">${fm(l.balance)}</td>
           <td class="r">${pct(l.rate)}</td><td>${l.tier}</td>
-          <td>${statusPill(l.status)}</td></tr>`).join('')}</table>`
+          <td>${statusPill(l.status)}</td>
+          <td>${(() => {
+            const sale = (d.loan_sales || []).find(s => s.kind === 'large' && s.loan_id === l.id);
+            return sale ? `<button class="small" onclick='confirmLoanSale(${jattr(sale)})'>Sell</button>` : '';
+          })()}</td></tr>`).join('')}</table>`
         : '<span class="sub">No individually-tracked large credits yet.</span>'}
     </div>`;
 }
@@ -878,6 +896,27 @@ async function tabLending(m) {
 function statusPill(s) {
   const map = { current: 'g', d30: 'y', d60: 'y', d90: 'r', npl: 'r' };
   return `<span class="pill ${map[s] || 'b'}">${esc(s.toUpperCase())}</span>`;
+}
+
+function confirmLoanSale(s) {
+  const html = `<div class="memoform">
+      <div class="who-name">${esc(s.label)}</div>
+      <div class="sub">${esc(s.buyer_name || '')} · ${esc(s.market_name || '')}</div>
+      <div class="memorow"><span class="k">Par sold</span><span class="v">${fm(s.par)}</span></div>
+      <div class="memorow"><span class="k">Price</span><span class="v">${fm(s.price)} (${(s.px_par * 100).toFixed(1)} cents)</span></div>
+      <div class="memorow"><span class="k">Gain / loss</span>
+        <span class="v ${cls(s.gain)}">${fm(s.gain)}</span></div>
+      <div class="memorow"><span class="k">Interest given up</span><span class="v">${fm(s.ni_year)}/yr</span></div>
+      <div class="memorow"><span class="k">Loans vs deposits after</span>
+        <span class="v">${((s.ldr_after || 0) * 100).toFixed(0)}%</span></div>
+      <p class="moved">${esc(s.owner)}</p>
+    </div>`;
+  const payload = {kind: s.kind, product: s.product, market: s.market,
+                   amount: s.par, loan_id: s.loan_id};
+  showHtml('Sell this book — ' + s.label, html, [
+    ['Sell to ' + (s.buyer_name || 'the buyer'),
+     `closeText();act('sell_loans',${jattr(payload)})`, 'primary'],
+  ]);
 }
 
 function showMemo(a) {

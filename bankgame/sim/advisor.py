@@ -632,6 +632,31 @@ def _r_hoarding(state):
         [_set("Raise dividend payout to 50%", "policies.dividend_payout", 50)])
 
 
+def _r_sell_seasoned(state):
+    """LDR or cash is tight — sell a book you already own. Never auto-sell."""
+    if not state["metrics"] or not state["metrics"][-1].get("earnings_ready"):
+        return None
+    m = state["metrics"][-1]
+    lr, _ = REG.liquidity_ratio(state)
+    if m.get("loan_to_deposit", 0) < 1.02 and lr >= 0.09:
+        return None
+    strips = LN.sellable_strips(state)
+    if not strips:
+        return None
+    prev = strips[0]
+    return _card(
+        "sell_seasoned", 1, "Sell a book you already own",
+        prev["owner"],
+        "New mortgages can still go to the agencies. This card is the "
+        "other half: a vintage already on the books, sold to a living "
+        "rival, with a mark. It does not buy anyone else's loans.",
+        "lending",
+        [_act("Sell %s" % prev["label"], "sell_loans",
+              {"kind": prev["kind"], "product": prev.get("product"),
+               "market": prev.get("market"), "amount": prev["par"],
+               "loan_id": prev.get("loan_id")})])
+
+
 def _r_sell_mortgages(state):
     m = state["metrics"][-1] if state["metrics"] else None
     if m is None or m.get("loan_to_deposit", 0) < 0.98:
@@ -995,7 +1020,7 @@ def _r_digital(state):
 
 _RULES = [
     _r_run_defense, _r_camels_repair, _r_mra_due, _r_capital_repair, _r_rate_risk, _r_bsa_weak,
-    _r_deposit_lag, _r_funding_stretch, _r_sell_mortgages, _r_late_cycle, _r_recession_cre,
+    _r_deposit_lag, _r_funding_stretch, _r_sell_seasoned, _r_sell_mortgages, _r_late_cycle, _r_recession_cre,
     _r_hire_lender, _r_second_county, _r_open_second_office, _r_digital,
     _r_market_leak, _r_pipeline_deal, _r_list_common, _r_credit_box_scale,
     _r_excess_cash, _r_uninsured_watch, _r_exam_prep,

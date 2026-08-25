@@ -1280,6 +1280,19 @@ def perform_action(state, action, payload):
         advisor.tutorial_off(state)
         return {"message": "Tour dismissed. It won't come back."}
 
+    if action == "sell_loans":
+        res = loans.sell_loans(
+            state,
+            kind=str(p.get("kind") or "pool"),
+            product=p.get("product"),
+            market=p.get("market"),
+            amount=p.get("amount"),
+            loan_id=p.get("loan_id"),
+        )
+        if isinstance(res, str):
+            raise ActionError(res)
+        return res
+
     if action == "close_pipeline":
         stock = 0.40 if p.get("stock") else 0.0
         res = close_pipeline_deal(state, int(_num("pipeline_id")), stock_frac=stock)
