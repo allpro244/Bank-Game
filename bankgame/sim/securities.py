@@ -355,10 +355,11 @@ def summary(state):
             "yield": round(sum(l["par"] * l["coupon"] for l in lots) / tot_par, 5) if tot_par else 0}
 
 
-# Deposit product durations (years). Checking barely moves; long CDs do.
+# Effective durations (years). Core deposits use decay, not overnight
+# beta — otherwise a community book looks like SVB on day one.
 _DEP_DUR = {
-    "checking": 0.08, "checking_int": 0.20, "savings": 0.45,
-    "money_market": 0.22, "cd_3m": 0.22, "cd_1y": 0.85,
+    "checking": 2.40, "checking_int": 2.10, "savings": 2.80,
+    "money_market": 0.70, "cd_3m": 0.22, "cd_1y": 0.85,
     "cd_2y": 1.60, "cd_5y": 3.10,
 }
 
