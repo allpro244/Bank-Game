@@ -44,8 +44,11 @@ def preview_branch(state, market_id, quality=2):
         return {"error": "unknown market"}
     from . import ledger as L
     from . import deposits as DEP
+    from . import regions as REGN
     from .regulation import capital_ratios, pca_category
 
+    unlocked = REGN.market_unlocked(state, market_id)
+    unlock_need = int(region.get("unlock_assets") or 0)
     cost = branch_open_cost(region)
     monthly = branch_monthly_cost(region, quality)
     cash_now = (state["bank"]["ledger"]["balances"]["1000"]
@@ -70,7 +73,10 @@ def preview_branch(state, market_id, quality=2):
     # CET1/RWA barely moves (deposits are not RWA); leverage is the tell.
     lev = te / max(1, new_assets)
 
-    if not can_fund:
+    if not unlocked:
+        verdict = "locked"
+        can_fund = False
+    elif not can_fund:
         verdict = "cannot_fund"
     elif te_ratio <= 0.03 or lev < 0.03:
         verdict = "lethal"
@@ -83,6 +89,8 @@ def preview_branch(state, market_id, quality=2):
         "market": market_id,
         "name": region["name"],
         "kind": region["kind"],
+        "unlocked": unlocked,
+        "unlock_assets": unlock_need,
         "cost": cost,
         "monthly": monthly,
         "can_fund": can_fund,
@@ -122,6 +130,10 @@ def open_branch(state, market_id, quality=2):
     region = state["regions"].get(market_id)
     if region is None:
         return "unknown market"
+    from . import regions as REGN
+    if not REGN.market_unlocked(state, market_id):
+        need = int(region.get("unlock_assets") or 0)
+        return "that market unlocks at about $%s of assets" % f"{need // 100:,}"
     cost = branch_open_cost(region)
     from .funding import ensure_cash
     if ensure_cash(state, cost) < cost:

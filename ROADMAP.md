@@ -640,7 +640,7 @@ as project work. Do not start H to avoid finishing A or I.
 
 | Item | Why it waits | Sketch |
 | --- | --- | --- |
-| Per-market deposit pricing | Useless until A1 share is sane | Offsets by market; promo money; Desk card when one town is leaking |
+| Per-market deposit pricing | A1 is sane | **Shipped with listing / weight-class towns** — franchise offset + town override; Desk card when one town leaks |
 | Competitor M&A vs your targets | Needs A3 pipeline | Rivals can buy the bank you were sizing |
 | Examiner MRAs with deadlines | Needs B7 exam as set piece | “Raise liquidity ratio above 10% by September” |
 | EVE / ±100–300 bp dashboard | Needs B3 owner labels | Treasury panel, not a new tab |

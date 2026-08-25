@@ -16,6 +16,7 @@ from .sim import deposits as DEP, loans as LN, regulation as REG, funding as FUN
 from .sim import fraud as FR, crises as CRI
 from .sim import advisor as ADV
 from .sim import operations as OPS
+from .sim import regions
 from .sim.newgame import new_game
 from .sim import goals as GOALS
 
@@ -200,7 +201,12 @@ class Game:
                 }
             return {
                 "offsets_bp": bank["deposits"]["offsets_bp"],
+                "market_offsets_bp": bank["deposits"].get("market_offsets_bp") or {},
                 "effective_rates": {p: DEP.effective_rate(s, p) for p in DEP.PRODUCTS},
+                "town_rates": {
+                    mid: {p: DEP.effective_rate(s, p, mid) for p in DEP.PRODUCTS}
+                    for mid in bank["deposits"]["pools"]
+                },
                 "promo_cd_bonus": bank["deposits"]["promo_cd_bonus"],
                 "fees": bank["deposits"]["fees"],
                 "totals": DEP.totals(bank["deposits"]),
@@ -242,6 +248,9 @@ class Game:
                 "liquidity_ratio": lr, "liquid_assets": liquid,
                 "shares": bank["shares"],
                 "tbv": L.total_equity(ledger) - ledger["balances"]["1600"],
+                "quote": FUND.share_quote(s),
+                "listing": FUND.listing_preview(s),
+                "listed": bool(bank.get("listed")),
                 "dividend_payout": bank["policies"]["dividend_payout"],
                 "aoci": -ledger["balances"]["3200"],
                 "overnight_policy": bank["funding"].get("overnight_policy", "ask"),
@@ -341,6 +350,8 @@ class Game:
                     "my_branches": len([b for b in bank["ops"]["branches"]
                                         if b["market"] == mid and b["open"]]),
                     "brand": bank["ops"]["brand"].get(mid, 0),
+                    "unlock_assets": int(r.get("unlock_assets") or 0),
+                    "unlocked": regions.market_unlocked(s, mid),
                     "history": r["history"][-120:],
                 }
             peers = competitors.peer_group(s)

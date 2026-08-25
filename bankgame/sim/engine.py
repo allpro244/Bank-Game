@@ -425,7 +425,8 @@ def _eligible_ma_markets(state):
     else:
         cap = 4
     allowed = [mid for mid, r in state["regions"].items()
-               if rank.get(r["kind"], 4) <= cap]
+               if rank.get(r["kind"], 4) <= cap
+               and regions.market_unlocked(state, mid)]
     served = [m for m in allowed if m in state["bank"]["deposits"]["pools"]]
     return served or allowed
 
@@ -515,8 +516,12 @@ def _ma_opportunities(state, rng):
                     "market": target_mkt, "credit_mark": round(rng.uniform(0.02, 0.09), 3)}
             pf = deal_proforma(state, deal)
             deal["proforma"] = pf
+            choices = ["buy", "pass"]
+            if state["bank"].get("listed"):
+                choices = ["buy", "buy_stock", "pass"]
             events.append({
                 "type": "bank_for_sale", "blocking": True,
+                "choices": choices,
                 "title": "Acquisition opportunity: %s" % name,
                 "text": ("%s (assets $%sM, based in %s) is quietly for sale. "
                          "That is %.2f× your bank. Price: $%s "
@@ -533,9 +538,10 @@ def _ma_opportunities(state, rng):
                             (" Cannot close: " + "; ".join(pf["blockers"]) + ".")
                             if pf["blockers"] else
                             " Regulatory approval still needs CAMELS 1-2, no orders, "
-                            "satisfactory CRA.")),
+                            "satisfactory CRA.")
+                            + (" Listed: you can pay 40% in stock at the last print."
+                               if state["bank"].get("listed") else "")),
                 "deal": deal,
-                "choices": ["buy", "pass"],
             })
 
     if assets > 100_000_000_00 and rng.chance(0.02) and \
@@ -646,15 +652,20 @@ def _resolve_fdic_bid(state, ev, premium_bp):
                           fr["branches"])}
 
 
-def _resolve_bank_purchase(state, ev):
+def _resolve_bank_purchase(state, ev, stock_frac=0.0):
     bank = state["bank"]
     deal = ev["deal"]
     pf = deal_proforma(state, deal)
     if not pf["can_buy"]:
         return "Cannot close: " + "; ".join(pf["blockers"]) + "."
-    from .funding import ensure_cash
-    if ensure_cash(state, deal["price"]) < deal["price"]:
-        return "Not enough cash for the purchase price ($%s)." % f"{deal['price'] // 100:,}"
+    stock_frac = 0.40 if stock_frac else 0.0
+    if stock_frac and not bank.get("listed"):
+        return "stock as deal currency requires a listing"
+    cash_part = int(deal["price"] * (1.0 - stock_frac))
+    stock_part = deal["price"] - cash_part
+    from .funding import ensure_cash, share_quote
+    if ensure_cash(state, cash_part) < cash_part:
+        return "Not enough cash for the purchase price ($%s)." % f"{cash_part // 100:,}"
 
     t_assets = deal["assets"]
     t_deposits = int(t_assets * 0.82)
@@ -664,7 +675,9 @@ def _resolve_bank_purchase(state, ev):
     net_assets = t_loans + t_sec + t_cash - t_deposits
     goodwill = max(0, deal["price"] - net_assets)
     lines = [["1300", t_loans, 0], ["1200", t_sec, 0], ["1000", t_cash, 0],
-             ["1600", goodwill, 0], ["1000", 0, deal["price"]]]
+             ["1600", goodwill, 0], ["1000", 0, cash_part]]
+    if stock_part > 0:
+        lines.append(["3000", 0, stock_part])
     if goodwill == 0 and deal["price"] < net_assets:
         lines.append(["4150", 0, net_assets - deal["price"]])   # bargain purchase gain
     split = {"2000": 0.25, "2010": 0.10, "2020": 0.15, "2030": 0.28, "2040": 0.22}
@@ -674,6 +687,11 @@ def _resolve_bank_purchase(state, ev):
         amt = t_deposits - alloc if i == len(keys) - 1 else int(t_deposits * split[acct])
         alloc += amt
         lines.append([acct, 0, amt])
+    issued = 0
+    if stock_part > 0:
+        q = share_quote(state)
+        issued = stock_part // max(1, q["px"])
+        bank["shares"] += issued
     L.post(bank["ledger"], state["time"]["date"],
            "Acquisition of %s" % deal["name"], lines, tag="ma")
     # acquired securities become AFS treasuries of medium tenor
@@ -690,9 +708,13 @@ def _resolve_bank_purchase(state, ev):
     _absorb_franchise(state, [deal["market"]], t_deposits, t_loans, branches, deal["name"])
     bank["acquisitions"].append({"name": deal["name"], "date": state["time"]["date"],
                                  "price": deal["price"], "attrition_months": 9})
+    extra = ""
+    if issued:
+        extra = " Paid %s in new stock (%s shares)." % (
+            f"${stock_part // 100:,}", f"{issued:,}")
     return {"message": "The deal closed. %s is now part of %s. Goodwill booked: $%s. "
-                       "Expect deposit attrition during integration."
-                       % (deal["name"], bank["name"], f"{goodwill // 100:,}")}
+                       "Expect deposit attrition during integration.%s"
+                       % (deal["name"], bank["name"], f"{goodwill // 100:,}", extra)}
 
 
 def _split_cents(total, weights):
@@ -736,7 +758,9 @@ def _absorb_franchise(state, markets, deposits_amt, loans_amt, n_branches, src_n
             if amt > 0:
                 rate = loans.offer_rate(state, prod, "B", mid)
                 loans.add_to_pool(bank["loans"], prod, mid, "B", year, amt, rate, 1.1)
-    per_b = max(1, n_branches // len(mkts))
+    # A deal buys the books, not a window farm. Extra offices in one
+    # town overlap the same catchment.
+    per_b = max(1, min(3, n_branches // len(mkts)))
     for mid in mkts:
         for _ in range(per_b):
             bank["ops"]["branches"].append({
@@ -995,6 +1019,20 @@ def perform_action(state, action, payload):
             raise ActionError(res)
         return {"message": "Preferred issued at %.2f%%." % (res["rate"] * 100)}
 
+    if action == "preview_list_common":
+        res = funding.listing_preview(state)
+        if isinstance(res, str):
+            raise ActionError(res)
+        return res
+
+    if action == "list_common":
+        res = funding.list_common(state)
+        if isinstance(res, str):
+            raise ActionError(res)
+        return {"message": "Listed at $%s a share (%.2fx book). Fees %s." % (
+            f"{res['px'] // 100:,}", res["price_to_book"],
+            f"${res['fees'] // 100:,}")}
+
     if action == "buyback":
         res = funding.buyback(state, int(_num("amount", 1)))
         if isinstance(res, str):
@@ -1135,7 +1173,8 @@ def _handle_event_choice(state, ev, choice, payload):
     if ev["type"] == "bank_for_sale":
         if choice == "pass":
             return {"message": "You passed on the deal."}
-        res = _resolve_bank_purchase(state, ev)
+        stock = 0.40 if choice == "buy_stock" else 0.0
+        res = _resolve_bank_purchase(state, ev, stock_frac=stock)
         if isinstance(res, str):
             raise ActionError(res)
         return res
@@ -1237,6 +1276,7 @@ def _resolve_overnight_choice(state, ev, choice):
 POLICY_SPECS = [
     # (prefix, keys-or-None, type, lo, hi)
     ("deposits.offsets_bp.", list(deposits.PRODUCTS), int, -300, 300),
+    ("deposits.market_offsets_bp.", None, int, -300, 300),
     ("deposits.promo_cd_bonus", None, float, 0.0, 0.03),
     ("deposits.fees.monthly_fee", None, int, 0, 50_00),
     ("deposits.fees.overdraft_fee", None, int, 0, 75_00),
@@ -1304,6 +1344,18 @@ def set_policy(state, path, value):
         if path.startswith("loans.credit_box."):
             loans.credit_box(state)
         parts = path.split(".")
+        if path.startswith("deposits.market_offsets_bp."):
+            if len(parts) != 4:
+                raise ActionError("town offset path is deposits.market_offsets_bp.<market>.<product>")
+            mid, prod = parts[2], parts[3]
+            if mid not in state["regions"]:
+                raise ActionError("unknown market")
+            if prod not in deposits.PRODUCTS:
+                raise ActionError("unknown product")
+            book = state["bank"]["deposits"].setdefault("market_offsets_bp", {})
+            town = book.setdefault(mid, {})
+            town[prod] = value
+            return {"path": path, "value": value}
         target = state["bank"] if parts[0] != "regulation" else state
         node = target
         for part in parts[:-1]:

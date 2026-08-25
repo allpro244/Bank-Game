@@ -807,6 +807,67 @@ def _r_second_county(state):
     return None
 
 
+def _r_market_leak(state):
+    """One town is paying the franchise rate and losing hot money."""
+    if not state["metrics"] or not state["metrics"][-1].get("earnings_ready"):
+        return None
+    served = [mid for mid in state["bank"]["deposits"]["pools"]
+              if DEP.office_count(state, mid) > 0]
+    if len(served) < 2:
+        return None
+    worst = None
+    for mid in served:
+        bal = state["bank"]["deposits"]["pools"][mid]["money_market"]["balance"]
+        if bal < 400_000_00:
+            continue
+        mine = DEP.effective_rate(state, "money_market", mid)
+        mkt = C.market_rates(state, mid)["deposit"].get("money_market", mine)
+        lag = mkt - mine
+        if lag < 0.0025:
+            continue
+        town = (state["bank"]["deposits"].get("market_offsets_bp") or {}).get(mid) or {}
+        if town.get("money_market") is not None:
+            continue
+        if worst is None or lag > worst[0]:
+            worst = (lag, mid, bal)
+    if worst is None:
+        return None
+    lag, mid, bal = worst
+    franchise = state["bank"]["deposits"]["offsets_bp"].get("money_market", 0)
+    bump = min(300, franchise + 25)
+    name = state["regions"][mid]["name"]
+    return _card(
+        "market_leak", 1, "%s is leaking hot money" % name,
+        "%s is %.0fbp behind the local money-market. That town's balances "
+        "are %s. Raise the %s money-market offset to %+dbp — the rest of "
+        "the franchise stays at %+dbp."
+        % (name, lag * 10000, _fm(bal), name, bump, franchise),
+        "Deposit beta is local. Paying up in the Permian should not reprice "
+        "Caprock checking. Town offsets sit on top of the franchise stance.",
+        "deposits",
+        [_set("Pay up in %s (+%dbp MM)" % (name, bump),
+              "deposits.market_offsets_bp.%s.money_market" % mid, bump)])
+
+
+def _r_list_common(state):
+    from . import funding as FUND
+    prev = FUND.listing_preview(state)
+    if isinstance(prev, str):
+        return None
+    return _card(
+        "list_common", 0, "You are big enough to list the stock",
+        "A listing costs %s in fees and prints a public price (about %.2fx "
+        "book, $%s a share). After that, buybacks hit the last print and "
+        "you can pay 40%% of a private deal in new stock. This is your "
+        "share price, not a stock-market minigame."
+        % (_fm(prev["fees"]), prev["price_to_book"],
+           f"{prev['px'] // 100:,}"),
+        "Private raises still work. Listing is a regional event — $500M "
+        "of assets, a 1–2 report card, well-capitalized.",
+        "treasury",
+        [_act("List the common stock", "list_common", {})])
+
+
 def _r_digital(state):
     """I3f / I7: only recommend digital when the preview is not 7% of book."""
     if not state["metrics"] or not state["metrics"][-1].get("earnings_ready"):
@@ -833,6 +894,7 @@ _RULES = [
     _r_run_defense, _r_camels_repair, _r_capital_repair, _r_rate_risk, _r_bsa_weak,
     _r_deposit_lag, _r_funding_stretch, _r_sell_mortgages, _r_late_cycle, _r_recession_cre,
     _r_hire_lender, _r_second_county, _r_open_second_office, _r_digital,
+    _r_market_leak, _r_list_common,
     _r_excess_cash, _r_uninsured_watch, _r_exam_prep,
     _r_fraud_weak, _r_core_old, _r_brand_decay, _r_hoarding,
 ]

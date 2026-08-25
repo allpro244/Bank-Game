@@ -331,7 +331,33 @@ def macro_pd_mult(state, product, market_id):
             m *= 1.0 + shock["sev"] * 2.2
     if region["mix"].get("oil", 0) > 0.15 and econ["oil"] < 42:
         m *= 1.0 + region["mix"]["oil"] * (42 - econ["oil"]) / 42 * 4.0
+        if econ["oil"] < 35 and product in ("ci", "cre", "construction"):
+            m *= 1.15
+    shock = region.get("shock")
+    if shock and shock["id"] == "hurricane" and product in (
+            "cre", "construction", "mortgage"):
+        m *= 1.0 + shock["sev"] * 1.8
+    # Austin-style tech book: equity drawdown hits C&I / CRE you booked there.
+    tech = region["mix"].get("tech", 0)
+    peak = max(200.0, econ.get("equity_peak") or econ.get("equity_index") or 200.0)
+    eq = econ.get("equity_index") or peak
+    if tech >= 0.25 and eq < peak * 0.82 and product in ("ci", "cre"):
+        m *= 1.0 + tech * (1.0 - eq / peak) * 2.4
     return min(9.0, m)
+
+
+def vintage_stress_mult(quality, credit_stress):
+    """Loose vintages amplify a bust; tight vintages dampen it.
+
+    Calm books (stress < 0.20) are unchanged so the 3-year sit-still
+    band does not move. Cowboy CRE from 2004 and fortress CRE from
+    the same year must get different autopsies.
+    """
+    stress = float(credit_stress or 0.0)
+    if stress < 0.20:
+        return 1.0
+    looseness = float(quality or 1.0) - 1.0
+    return max(0.55, min(2.4, 1.0 + looseness * stress * 2.2))
 
 
 def franchise_origination_scale(state):
@@ -871,7 +897,8 @@ def step_month_credit(state, rng):
 
         # ---- delinquency rolls ----
         pdm = (BASE_PD[p["product"]] / 12.0) * TIER_PD_MULT[p["tier"]] * p["quality"] \
-            * macro_pd_mult(state, p["product"], p["market"]) * _seasoning(p)
+            * macro_pd_mult(state, p["product"], p["market"]) * _seasoning(p) \
+            * vintage_stress_mult(p["quality"], state["economy"].get("credit_stress"))
         pdm = min(0.20, pdm)
         c = max(0.0, 1.0 - p["d30"] - p["d60"] - p["d90"] - p["npl"])
         new30 = c * pdm * 3.2          # entry into 30dpd is several x the pd
@@ -1095,7 +1122,8 @@ def quarterly_cecl(state):
             continue
         life_years = min((TERM_M[p["product"]] or 36) / 12.0, 5.0) * 0.6
         el = (BASE_PD[p["product"]] * TIER_PD_MULT[p["tier"]] * p["quality"]
-              * LGD[p["product"]] * life_years * forecast)
+              * LGD[p["product"]] * life_years * forecast
+              * vintage_stress_mult(p["quality"], econ.get("credit_stress")))
         # delinquency-adjusted: troubled buckets carry specific reserves
         specific = (p["d30"] * 0.10 + p["d60"] * 0.25 + p["d90"] * 0.45
                     + p["npl"] * LGD[p["product"]])

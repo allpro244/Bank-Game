@@ -1041,7 +1041,36 @@ async function tabDeposits(m) {
         return `<tr><td>${esc(mk.name)}</td>${cells}<td class="r"><b>${fmc(tot)}</b></td></tr>`;
       }).join('')}
       </table>
+      ${townStancePanel(d)}
     </div>`;
+}
+function townStancePanel(d) {
+  const mids = Object.keys(d.pools || {});
+  if (mids.length < 2) return '';
+  const town = d.market_offsets_bp || {};
+  const rows = mids.map(mid => {
+    const mk = d.pools[mid];
+    const ov = town[mid] || {};
+    const mm = ov.money_market != null ? ov.money_market : '';
+    const cd = ov.cd_1y != null ? ov.cd_1y : '';
+    const pay = d.town_rates && d.town_rates[mid] ? pct(d.town_rates[mid].money_market) : '—';
+    return `<tr>
+      <td>${esc(mk.name)}</td>
+      <td class="r">${pay}</td>
+      <td class="r"><input type="number" step="5" min="-300" max="300" placeholder="franchise"
+        value="${mm}"
+        onchange="if(this.value==='')return;setPol('deposits.market_offsets_bp.${mid}.money_market', parseInt(this.value))"></td>
+      <td class="r"><input type="number" step="5" min="-300" max="300" placeholder="franchise"
+        value="${cd}"
+        onchange="if(this.value==='')return;setPol('deposits.market_offsets_bp.${mid}.cd_1y', parseInt(this.value))"></td>
+    </tr>`;
+  }).join('');
+  return `<h3 style="margin-top:14px">Town stance</h3>
+    <div class="helptip">Franchise offsets apply everywhere. A town box overrides money market or the 1-year CD in that market only — pay up in the Permian without re-pricing Caprock.</div>
+    <table><tr><th>Town</th><th class="r">You pay MM</th>
+      <th class="r">MM offset bp</th><th class="r">CD 1y offset bp</th></tr>
+      ${rows}
+    </table>`;
 }
 function sumAccounts(pools, p) {
   return Object.values(pools).reduce((a, mk) => a + mk.products[p].accounts, 0);
@@ -1129,7 +1158,10 @@ async function tabTreasury(m) {
         <span class="k">Shares outstanding</span><span class="v">${d.shares.toLocaleString()}</span>
         <span class="k">Tangible book value</span><span class="v">${fm(d.tbv)}</span>
         <span class="k">TBV per share</span><span class="v">${fm(Math.round(d.tbv / d.shares))}</span>
+        <span class="k">${d.listed ? 'Last print' : 'Implied private price'}</span>
+        <span class="v">${d.quote ? (fm(d.quote.px) + ' · ' + d.quote.price_to_book.toFixed(2) + '× book') : '—'}</span>
       </div>
+      ${listingBlock(d)}
       <div class="ctl" style="margin-top:8px"><label>Raise common $</label>
         <input type="number" id="cap-amt" value="2000000">
         <button class="small" onclick="confirmRaiseCommon()">Raise</button></div>
@@ -1262,6 +1294,7 @@ const VERDICT_TEXT = {
   lethal: 'This will dilute you below well-capitalized',
   stretch: 'Stretch — capital gets tight after the gather',
   safe: 'Safe for a bank your size',
+  locked: 'Locked — this market is a later weight class',
 };
 
 function branchOptions(d) {
@@ -1276,7 +1309,8 @@ function branchOptions(d) {
     if (!rows.length) return '';
     return `<optgroup label="${esc(KIND_LABELS[k] || k)}">${rows.map(([mid, mk]) => {
       const p = (d.previews || {})[mid] || {};
-      const tag = p.already ? ' — another office'
+      const tag = p.verdict === 'locked' ? ' — unlocks at ' + fmc(p.unlock_assets || 0)
+        : p.already ? ' — another office'
         : p.verdict === 'cannot_fund' ? ' — cannot fund'
         : p.verdict === 'lethal' ? ' — capital event'
         : p.verdict === 'stretch' ? ' — stretch' : '';
@@ -1325,7 +1359,9 @@ function marketGroups(d) {
         <th>Verdict</th><th></th></tr>
       ${rows.map(([mid, r]) => {
         const p = (d.previews || {})[mid] || {};
-        const verdict = r.my_branches
+        const verdict = !r.unlocked
+          ? ('Unlocks at ' + fmc(r.unlock_assets || 0) + ' of assets')
+          : r.my_branches
           ? 'Another office is allowed (diminishing gather).'
           : (VERDICT_TEXT[p.verdict] || p.verdict || '');
         return `<tr>
@@ -1356,7 +1392,7 @@ function openMarketPreview(mid) {
         <span class="v">${((p.proforma_leverage || 0) * 100).toFixed(1)}%</span></div>
       <p class="moved">${esc(vtxt)}</p>
     </div>`;
-  const btns = p.can_fund
+  const btns = (p.can_fund && p.verdict !== 'locked')
     ? [['Open this branch', `closeText();act('open_branch',{market:${JSON.stringify(mid)}})`,
         (p.verdict === 'lethal' || p.verdict === 'stretch') ? 'danger' : 'primary']]
     : [];
@@ -1386,7 +1422,33 @@ function confirmDigital() {
   if (ok) act('invest_digital');
 }
 
-async function confirmRaiseCommon() {
+function listingBlock(d) {
+  if (d.listed) {
+    return `<div class="helptip">Listed. Buybacks hit the last print. Private deals can take 40% in new stock.</div>`;
+  }
+  const p = d.listing;
+  if (typeof p === 'string') {
+    return `<div class="helptip">Listing: ${esc(p)}.</div>`;
+  }
+  if (p && p.can_list) {
+    return `<div class="ctl" style="margin-top:8px">
+      <button class="small" onclick="confirmListCommon()">List the common (${fm(p.fees)} fees · ${fm(p.px)}/sh)</button>
+    </div>`;
+  }
+  return '';
+}
+async function confirmListCommon() {
+  try {
+    const r = await api('/api/action', { action: 'preview_list_common', payload: {} });
+    const p = r.result || r;
+    if (p.error || p.message && !p.can_list) { toast(p.error || p.message, true); return; }
+    const ok = confirm('List the common stock? Fees ' + fm(p.fees)
+      + '. Opening print about ' + fm(p.px) + ' (' + (p.price_to_book || 0).toFixed(2)
+      + '× book). Buybacks and stock deals will use this price.');
+    if (ok) act('list_common', {});
+  } catch (e) { toast(String(e), true); }
+}
+function confirmRaiseCommon() {
   const amt = moneyIn('cap-amt');
   if (!amt) return;
   try {
@@ -1919,9 +1981,11 @@ function renderEventModal() {
     const pf = (ev.deal && ev.deal.proforma) || {};
     const blocked = pf.can_buy === false;
     const why = (pf.blockers || []).join('; ');
+    const listed = !!(SUM.treasury && SUM.treasury.listed) || !!(ev.choices || []).includes('buy_stock');
     controls = `<div class="btnrow">
       <button class="primary" ${blocked ? 'disabled title="' + esc(why) + '"' : ''}
-        onclick="eventChoice(${ev.id}, 'buy')">${blocked ? 'Cannot close' : 'Buy it'}</button>
+        onclick="eventChoice(${ev.id}, 'buy')">${blocked ? 'Cannot close' : 'Buy it (cash)'}</button>
+      ${listed && !blocked ? `<button onclick="eventChoice(${ev.id}, 'buy_stock')">Buy 60% cash / 40% stock</button>` : ''}
       <button onclick="eventChoice(${ev.id}, 'pass')">Pass</button></div>
       ${blocked ? `<div class="helptip">${esc(why)}</div>` : ''}`;
   } else if (ev.type === 'exam') {

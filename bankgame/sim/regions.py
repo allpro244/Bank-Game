@@ -58,6 +58,33 @@ MARKET_DEFS = [
      "pop": 19500000, "income": 92000, "growth": 0.8,
      "mix": {"services": 0.80, "tech": 0.20},
      "competition": 2.6, "note": "The big leagues. Bottomless deposits, merciless competition."},
+    # Weight-class unlocks. The towns exist from day one; you cannot
+    # open there until the book is in that class. Not a 50-state pack.
+    {"id": "desmoines", "name": "Des Moines, IA", "kind": "small_metro",
+     "pop": 280000, "income": 54000, "growth": 0.7,
+     "mix": {"ag": 0.40, "services": 0.50, "mfg": 0.10},
+     "competition": 1.2, "unlock_assets": 200_000_000_00,
+     "note": "Iowa insurance and corn. An ag book without the Permian."},
+    {"id": "neworleans", "name": "New Orleans, LA", "kind": "metro",
+     "pop": 1270000, "income": 52000, "growth": 0.6,
+     "mix": {"port": 0.35, "services": 0.50, "mfg": 0.15},
+     "competition": 1.5, "unlock_assets": 400_000_000_00,
+     "note": "River and gulf. Hurricanes and trade, not Houston energy."},
+    {"id": "charlotte", "name": "Charlotte, NC", "kind": "metro",
+     "pop": 2700000, "income": 61000, "growth": 1.5,
+     "mix": {"services": 0.70, "mfg": 0.15, "tech": 0.15},
+     "competition": 1.7, "unlock_assets": 1_000_000_000_00,
+     "note": "Carolinas super-regional town. Banking is the local industry."},
+    {"id": "chicago", "name": "Chicago, IL", "kind": "money_center",
+     "pop": 9500000, "income": 72000, "growth": 0.7,
+     "mix": {"services": 0.70, "mfg": 0.20, "tech": 0.10},
+     "competition": 2.3, "unlock_assets": 2_000_000_000_00,
+     "note": "Midwest clearing. Another money center, not a bigger Dallas."},
+    {"id": "losangeles", "name": "Los Angeles, CA", "kind": "money_center",
+     "pop": 13200000, "income": 70000, "growth": 0.9,
+     "mix": {"services": 0.55, "port": 0.15, "tech": 0.20, "mfg": 0.10},
+     "competition": 2.4, "unlock_assets": 5_000_000_000_00,
+     "note": "West-coast deposits. Merciless, coastal, a different oil."},
 ]
 
 # Deposits per capita by market kind (dollars) -- scaled by income
@@ -94,9 +121,22 @@ def new_regions(rng):
             "employment_shock": 0.0,       # adds to local unemployment
             "housing_index": 100.0,
             "shock": None,                 # active local shock
+            "unlock_assets": int(d.get("unlock_assets") or 0),
             "history": [],
         }
     return regions
+
+
+def market_unlocked(state, market_id):
+    """Weight-class towns exist on the map; you cannot enter until the book fits."""
+    region = state["regions"].get(market_id)
+    if region is None:
+        return False
+    need = int(region.get("unlock_assets") or 0)
+    if need <= 0:
+        return True
+    assets = max(0, state["bank"].get("cached_assets") or 0)
+    return assets >= need
 
 
 def market_condition(region, econ):
