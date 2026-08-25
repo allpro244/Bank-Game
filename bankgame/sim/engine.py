@@ -774,7 +774,7 @@ def _absorb_franchise(state, markets, deposits_amt, loans_amt, n_branches, src_n
         for prod, amt in _split_cents(share, split):
             if amt > 0:
                 rate = loans.offer_rate(state, prod, "B", mid)
-                loans.add_to_pool(bank["loans"], prod, mid, "B", year, amt, rate, 1.1)
+                loans.book_flow(state, prod, mid, "B", year, amt, rate, 1.1)
     # A deal buys the books, not a window farm. Extra offices in one
     # town overlap the same catchment.
     per_b = max(1, min(3, n_branches // len(mkts)))
@@ -1281,6 +1281,20 @@ def perform_action(state, action, payload):
         from . import advisor
         advisor.tutorial_off(state)
         return {"message": "Tour dismissed. It won't come back."}
+
+    if action == "preview_loan_stance":
+        res = loans.preview_loan_stance(state, str(p.get("product") or ""),
+                                        str(p.get("stance") or ""))
+        if isinstance(res, str):
+            raise ActionError(res)
+        return res
+
+    if action == "set_loan_stance":
+        res = loans.set_loan_stance(state, str(p.get("product") or ""),
+                                    str(p.get("stance") or ""))
+        if isinstance(res, str):
+            raise ActionError(res)
+        return res
 
     if action == "sell_loans":
         res = loans.sell_loans(

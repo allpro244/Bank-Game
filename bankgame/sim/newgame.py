@@ -8,7 +8,7 @@ from . import funding, operations, regulation, fraud, crises
 START_DATE = "2000-01-03"   # a Monday
 
 RNG_STREAMS = ["econ", "region", "credit", "deposit", "fraud", "comp", "ops",
-               "crisis", "event", "misc"]
+               "crisis", "event", "misc", "tape"]
 
 
 def new_game(name="First National Bank of Caprock", seed=12345,
@@ -137,9 +137,8 @@ def _seed_balance_sheet(state):
     total_loans = 0
     for prod, tier, amt in loan_seed:
         rate = loans.offer_rate(state, prod, tier, "caprock")
-        pool = loans.add_to_pool(bank["loans"], prod, _home(state), tier, "1997",
-                                 amt, rate, 1.0)
-        pool["age_m"] = 30
+        loans.book_flow(state, prod, _home(state), tier, "1997",
+                        amt, rate, 1.0, age_m=30)
         total_loans += amt
 
     # ---- securities: $4.0M ----

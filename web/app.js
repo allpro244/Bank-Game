@@ -55,6 +55,8 @@ const DICT = {
     g: 'Basis points (1bp = 0.01%) versus the going market rate. Negative = undercut competitors to win volume with thinner margins; positive = premium pricing.' },
   standards: { b: 'Standards', o: 'How picky you are',
     g: 'Underwriting standards. Loose books more volume from weaker borrowers — and every loan pool permanently remembers the standards it was written under when the next recession arrives.' },
+  stance: { b: 'Loan stance', o: 'Appetite for this line',
+    g: 'Starve, Hold, Grow, or Hunt. Each one writes your price versus the street, how picky you are, and whether this line may grow. Loans already booked keep the rate and standards they were written under.' },
   tier: { b: 'Tier', o: 'Borrower grade',
     g: 'Credit grade: A = strong borrower, low loss risk; B = acceptable; C = marginal, priced up for risk (about 6x the default rate of an A).' },
   dscr: { b: 'DSCR', o: 'Payment coverage',
@@ -757,7 +759,12 @@ const PRODUCT_LABELS = {
 };
 
 async function tabLending(m) {
-  const d = await section('lending');
+  const q = ['name=lending'];
+  if (TAPE_F.product) q.push('tape_product=' + encodeURIComponent(TAPE_F.product));
+  if (TAPE_F.status) q.push('tape_status=' + encodeURIComponent(TAPE_F.status));
+  if (TAPE_F.offset) q.push('tape_offset=' + TAPE_F.offset);
+  const d = await api('/api/section?' + q.join('&'));
+  SEC.lending = d;
   const port = d.portfolio;
   const prods = Object.keys(PRODUCT_LABELS).filter(p => d.products_enabled.includes(p));
   m.innerHTML = `
@@ -791,26 +798,23 @@ async function tabLending(m) {
 
     <div class="grid g2">
     <div class="panel">
-      <h3>Pricing & underwriting (by product)</h3>
-      <div class="helptip">Spread: your pricing vs the market in basis points (negative = undercut to win volume).
-      Standards: 0 = anything with a pulse … 4 = fortress. Limit: cap as % of total loans (0 = none).</div>
-      <table><tr><th>Product</th><th class="r">Mkt rate</th><th class="r">${dt('spread')}</th>
-        <th class="r">${dt('standards')}</th><th class="r">Limit %</th><th class="r">Balance</th>
+      <h3>${dt('stance', 'Book appetite')}</h3>
+      <div class="helptip">You pick a stance per line — not a spreadsheet. Starve / Hold lock today’s mix. Grow / Hunt have no cap. Preview first; loans already booked keep their rate and standards.</div>
+      ${renderMixBar(d.mix || [], prods)}
+      <table><tr><th>Product</th><th class="r">Mkt rate</th><th>${dt('stance')}</th>
+        <th class="r">Balance</th><th class="r">Mix</th>
         <th class="r">30-89dpd</th><th class="r">${dt('npa', MODE === 'owner' ? 'Not paying' : 'NPL')}</th></tr>
       ${prods.map(p => {
         const st = port[p] || { balance: 0, npl: 0, d3090: 0 };
+        const row = (d.mix || []).find(x => x.product === p) || {};
+        const stance = row.stance || (d.stances || {})[p] || 'hold';
+        const mixPct = Math.round((row.pct || 0) * 100);
         return `<tr>
           <td>${PRODUCT_LABELS[p]}</td>
           <td class="r">${pct(d.market_rates[p])}</td>
-          <td class="r"><input type="number" step="5" id="sp-${p}" value="${d.spreads[p]}"
-               oninput="prevSpread('${p}', this.value, ${d.spreads[p]})"
-               onchange="setPol('loans.spreads.${p}', parseInt(this.value))"></td>
-          <td class="r"><select onchange="applyStd('${p}', this.value, ${d.standards[p]})">
-            ${[0,1,2,3,4].map(t => `<option value="${t}" ${d.standards[p]===t?'selected':''}>${['Loose','Easy','Standard','Tight','Fortress'][t]}</option>`).join('')}
-          </select></td>
-          <td class="r"><input type="number" step="5" min="0" max="100" value="${d.limits[p]}"
-               onchange="setPol('loans.limits.${p}', parseInt(this.value))"></td>
+          <td>${stanceButtons(p, stance)}</td>
           <td class="r">${fmc(st.balance)}</td>
+          <td class="r">${mixPct}%${row.limit ? ` <span class="sub">cap ${row.limit}%</span>` : ''}</td>
           <td class="r ${st.d3090 > 0 ? 'warn' : ''}">${fmc(st.d3090)}</td>
           <td class="r ${st.npl > 0 ? 'neg' : ''}">${fmc(st.npl)}</td>
         </tr>`;
@@ -883,20 +887,123 @@ async function tabLending(m) {
     </div>
 
     <div class="panel" style="margin-top:12px">
-      <h3>Large credits on the books</h3>
-      ${d.large.length ? `<table><tr><th>Borrower</th><th>Product</th><th>Market</th>
-        <th class="r">Balance</th><th class="r">Rate</th><th>Tier</th><th>Status</th><th></th></tr>
-        ${d.large.slice().reverse().map(l => `<tr>
-          <td>${esc(l.name)}</td><td>${PRODUCT_LABELS[l.product] || l.product}</td>
-          <td>${esc(l.market_name || l.market)}</td><td class="r">${fm(l.balance)}</td>
-          <td class="r">${pct(l.rate)}</td><td>${l.tier}</td>
-          <td>${statusPill(l.status)}</td>
-          <td>${(() => {
-            const sale = (d.loan_sales || []).find(s => s.kind === 'large' && s.loan_id === l.id);
-            return sale ? `<button class="small" onclick='confirmLoanSale(${jattr(sale)})'>Sell</button>` : '';
-          })()}</td></tr>`).join('')}</table>`
-        : '<span class="sub">No individually-tracked large credits yet.</span>'}
+      <h3>The tape — every loan on the books</h3>
+      ${renderTape(d, prods)}
     </div>`;
+}
+
+const STANCE_META = {
+  starve: { l: 'Starve', t: 'Price up, fortress, lock today’s mix. Run it off.' },
+  hold:   { l: 'Hold',   t: 'Match the street, standard underwriting. Click Apply to lock today’s mix.' },
+  grow:   { l: 'Grow',   t: 'Shade price, ease a notch, no cap.' },
+  hunt:   { l: 'Hunt',   t: 'Buy share. The vintage will remember.' },
+};
+const MIX_COLOR = {
+  auto: '#58a6ff', mortgage: '#46c78c', heloc: '#3fb37f', credit_card: '#7d8b99',
+  small_business: '#e0b050', ci: '#c9a227', cre: '#e06060', construction: '#d4894a',
+  ag: '#46c78c', sba: '#58a6ff',
+};
+let TAPE_F = { product: '', status: '', offset: 0 };
+
+function stanceButtons(product, current) {
+  return `<div class="stances">${['starve','hold','grow','hunt'].map(s => {
+    const m = STANCE_META[s];
+    const on = current === s ? ' on' : '';
+    return `<button class="small ${s}${on}" title="${esc(m.t)}"
+      onclick="clickStance('${product}','${s}')">${m.l}</button>`;
+  }).join('')}${current === 'custom' ? ' <span class="sub">custom</span>' : ''}</div>`;
+}
+
+function renderMixBar(mix, prods) {
+  const rows = (mix || []).filter(x => x.balance > 0 && prods.includes(x.product));
+  const tot = rows.reduce((a, x) => a + x.balance, 0) || 1;
+  if (!rows.length) return '';
+  return `<div class="mixbar">${rows.map(x =>
+    `<i style="width:${(x.balance / tot * 100).toFixed(1)}%;background:${MIX_COLOR[x.product] || '#4d5a68'}"
+        title="${esc(PRODUCT_LABELS[x.product] || x.product)} ${fm(x.balance)}"></i>`
+  ).join('')}</div>
+  <div class="mixleg">${rows.map(x =>
+    `<span><i style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${MIX_COLOR[x.product] || '#4d5a68'};margin-right:4px"></i>${esc(PRODUCT_LABELS[x.product] || x.product)} <b>${Math.round(x.pct * 100)}%</b></span>`
+  ).join('')}</div>`;
+}
+
+async function clickStance(product, stance) {
+  try {
+    const r = await api('/api/action', { action: 'preview_loan_stance',
+      payload: { product, stance } });
+    const prev = r.result || r;
+    const el = $('prev-lending');
+    if (el) el.innerHTML = `${esc(prev.owner || '')}
+      <button class="small primary" onclick="commitStance('${product}','${stance}')">Apply ${STANCE_META[stance].l}</button>`;
+  } catch (e) { toast(String(e), true); }
+}
+
+async function commitStance(product, stance) {
+  try {
+    const r = await api('/api/action', { action: 'set_loan_stance',
+      payload: { product, stance } });
+    toast((r.result && r.result.message) || (STANCE_META[stance].l + ' applied'));
+    await refresh();
+  } catch (e) { toast(String(e), true); }
+}
+
+function renderTape(d, prods) {
+  const t = d.tape || { rows: [], total: 0, named: 0, strips: 0, large: 0, dollars: 0 };
+  const filt = `<div class="ctl"><label>Product</label>
+      <select onchange="tapeFilter('product', this.value)">
+        <option value="">All</option>
+        ${prods.map(p => `<option value="${p}" ${TAPE_F.product===p?'selected':''}>${PRODUCT_LABELS[p]}</option>`).join('')}
+      </select></div>
+    <div class="ctl"><label>Status</label>
+      <select onchange="tapeFilter('status', this.value)">
+        ${[['','All'],['current','Current'],['d30','30 dpd'],['d60','60 dpd'],['d90','90 dpd'],['npl','Not paying']]
+          .map(([v,l]) => `<option value="${v}" ${TAPE_F.status===v?'selected':''}>${l}</option>`).join('')}
+      </select></div>
+    <span class="sub">${t.total} loans · ${fm(t.dollars)} · ${t.named} named · ${t.strips} strips · ${t.large} large credits</span>`;
+  if (!t.rows.length) {
+    return `${filt}<div class="sub" style="margin-top:8px">The tape is empty. That should not happen on a living book.</div>`;
+  }
+  const more = t.total > t.rows.length
+    ? `<div class="sub" style="margin-top:6px">Showing ${t.rows.length} of ${t.total}. Filter to narrow, or troubled names sort first.</div>` : '';
+  return `${filt}
+    <table style="margin-top:8px"><tr><th>Borrower</th><th>Product</th><th>Town</th>
+      <th class="r">Balance</th><th class="r">Rate</th><th>Tier</th><th>Status</th><th></th></tr>
+      ${t.rows.map(l => `<tr class="click" onclick='showNote(${jattr(l)})'>
+        <td>${esc(l.name)}${l.kind==='strip' ? ` <span class="sub">×${l.count}</span>` : ''}</td>
+        <td>${PRODUCT_LABELS[l.product] || l.product}</td>
+        <td>${esc(l.market_name || l.market)}</td>
+        <td class="r">${fm(l.balance)}</td>
+        <td class="r">${pct(l.rate)}</td>
+        <td>${l.tier}</td>
+        <td>${statusPill(l.status)}</td>
+        <td>${(() => {
+          const sale = (d.loan_sales || []).find(s => s.kind === 'large' && s.loan_id === l.id);
+          return sale ? `<button class="small" onclick="event.stopPropagation();confirmLoanSale(${jattr(sale)})">Sell</button>` : '';
+        })()}</td></tr>`).join('')}</table>${more}`;
+}
+
+function tapeFilter(key, value) {
+  TAPE_F[key] = value || '';
+  TAPE_F.offset = 0;
+  if (TAB === 'lending') renderTab();
+}
+
+function showNote(l) {
+  const strip = l.kind === 'strip'
+    ? `<p class="sub">${l.count} similar ${PRODUCT_LABELS[l.product] || l.product} notes in this vintage, counted together so the save stays playable. The dollars are real.</p>`
+    : (l.kind === 'large'
+      ? '<p class="sub">Individually underwritten. You signed the memo.</p>'
+      : '<p class="sub">A loan on your books. Flow-book notes still roll with their vintage; the dollars here match that pool.</p>');
+  showHtml(l.name, `<div class="memoform">
+    ${strip}
+    <div class="memorow"><span class="k">Product</span><span class="v">${esc(PRODUCT_LABELS[l.product] || l.product)}</span></div>
+    <div class="memorow"><span class="k">Town</span><span class="v">${esc(l.market_name || l.market)}</span></div>
+    <div class="memorow"><span class="k">Balance</span><span class="v">${fm(l.balance)}</span></div>
+    <div class="memorow"><span class="k">Rate</span><span class="v">${pct(l.rate)}</span></div>
+    <div class="memorow"><span class="k">Tier</span><span class="v">${esc(l.tier)}</span></div>
+    <div class="memorow"><span class="k">Status</span><span class="v">${statusPill(l.status)}</span></div>
+    ${l.vint ? `<div class="memorow"><span class="k">Vintage</span><span class="v">${esc(l.vint)}</span></div>` : ''}
+  </div>`);
 }
 
 function statusPill(s) {

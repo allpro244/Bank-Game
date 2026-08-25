@@ -42,6 +42,27 @@ TIER_RATE_ADJ = {"A": -0.005, "B": 0.0, "C": 0.016}
 TIER_MIX = {0: (0.25, 0.45, 0.30), 1: (0.33, 0.45, 0.22), 2: (0.42, 0.44, 0.14),
             3: (0.55, 0.38, 0.07), 4: (0.68, 0.30, 0.02)}
 
+# Player-facing appetite. Writes spreads / standards / limits. Hold on a
+# fresh charter matches today's default (market, standard, no cap) so the
+# 3-year sit-still band does not move. Clicking Hold later snapshots a cap.
+STANCES = {
+    "starve": {"spread": 75, "standards": 4, "cap": True},
+    "hold":   {"spread": 0, "standards": 2, "cap": False},
+    "grow":   {"spread": -25, "standards": 1, "cap": False},
+    "hunt":   {"spread": -75, "standards": 0, "cap": False},
+}
+STANCE_ORDER = ("starve", "hold", "grow", "hunt")
+
+# Typical ticket for splitting a pool booking into named notes.
+TICKET = {
+    "auto": 22_000_00, "mortgage": 165_000_00, "heloc": 45_000_00,
+    "credit_card": 8_000_00, "small_business": 75_000_00, "ci": 220_000_00,
+    "cre": 350_000_00, "construction": 280_000_00, "ag": 140_000_00,
+    "sba": 150_000_00,
+}
+MAX_NAMED_NOTES = 750
+MAX_NOTES_PER_BOOKING = 40
+
 # fraction of a market's deposit pool that shows up as annual loan demand per product
 DEMAND_FACTOR = {"auto": 0.045, "mortgage": 0.11, "heloc": 0.018, "credit_card": 0.02,
                  "small_business": 0.035, "ci": 0.06, "cre": 0.07, "construction": 0.025,
@@ -86,6 +107,9 @@ def default_config():
         "spreads": {p: 0 for p in PRODUCTS},        # player lever, bp vs market
         "standards": {p: 2 for p in PRODUCTS},      # 0 loose .. 4 tight
         "limits": {p: 0 for p in PRODUCTS},         # cap, % of total loans (0 = none)
+        "stances": {p: "hold" for p in PRODUCTS},   # starve|hold|grow|hunt
+        "notes": [],                                # individual tape, tied to pools
+        "next_note_id": 1,
         "approval_threshold": 500_000_00,           # manual approval above this
         "auto_policy": "queue",                     # queue | approve_ab | decline
         "credit_box": {
@@ -252,6 +276,382 @@ def add_to_pool(cfg, product, market, tier, year, amount, rate, quality):
         pool["quality"] = round(pool["quality"] * (1 - w_new) + quality * w_new, 4)
     pool["balance"] += amount
     return pool
+
+
+def book_flow(state, product, market, tier, year, amount, rate, quality, age_m=0):
+    """Book flow-book dollars into the vintage pool and name the notes."""
+    cfg = state["bank"]["loans"]
+    pool = add_to_pool(cfg, product, market, tier, year, amount, rate, quality)
+    if age_m:
+        pool["age_m"] = max(int(pool.get("age_m") or 0), int(age_m))
+    issue_notes(state, product, market, tier, str(year), amount, rate, quality,
+                age_m=int(pool.get("age_m") or 0))
+    return pool
+
+
+def _tape_rng(state):
+    from . import rng as R
+    streams = state.setdefault("rng", {})
+    if "tape" not in streams:
+        seed = (state.get("meta") or {}).get("seed", 1)
+        streams["tape"] = R.seed_stream(seed, "tape")
+    return R.Rng(streams["tape"])
+
+
+def _note_name(rng, product):
+    if product in ("auto", "mortgage", "heloc", "credit_card"):
+        return "%s %s" % (rng.choice(FIRST), rng.choice(LAST))
+    return "%s %s" % (rng.choice(LAST), rng.choice(BIZ))
+
+
+def _pool_key(product, market, tier, year):
+    return (product, market, tier, str(year))
+
+
+def issue_notes(state, product, market, tier, year, amount, rate, quality, age_m=0):
+    """Split a pool booking into named notes. Does not touch the GL."""
+    amount = int(amount)
+    if amount <= 0:
+        return []
+    cfg = state["bank"]["loans"]
+    notes = cfg.setdefault("notes", [])
+    rng = _tape_rng(state)
+    ticket = TICKET.get(product, 100_000_00)
+    n = max(1, int(round(amount / max(1, ticket))))
+    year = str(year)
+    created = []
+    if n > MAX_NOTES_PER_BOOKING:
+        rec = _new_note(cfg, product, market, tier, year, amount, rate, quality,
+                        age_m, kind="strip", count=n,
+                        name=_strip_label(state, n, product, market, tier, year))
+        notes.append(rec)
+        created.append(rec)
+    else:
+        parts = _split_cents(amount, n)
+        for part in parts:
+            rec = _new_note(cfg, product, market, tier, year, part, rate, quality,
+                            age_m, kind="note", count=1,
+                            name=_note_name(rng, product))
+            notes.append(rec)
+            created.append(rec)
+    _compress_notes(state)
+    return created
+
+
+def _split_cents(total, n):
+    n = max(1, int(n))
+    base = total // n
+    rem = total - base * n
+    out = [base] * n
+    out[-1] += rem
+    return [x for x in out if x > 0]
+
+
+def _new_note(cfg, product, market, tier, year, amount, rate, quality, age_m,
+              kind, count, name):
+    nid = int(cfg.get("next_note_id") or 1)
+    cfg["next_note_id"] = nid + 1
+    return {
+        "id": nid, "kind": kind, "count": int(count), "name": name,
+        "product": product, "market": market, "tier": tier, "vint": str(year),
+        "balance": int(amount), "orig_amount": int(amount), "rate": rate,
+        "quality": quality, "age_m": int(age_m or 0), "status": "current",
+    }
+
+
+def _strip_label(state, count, product, market, tier, year):
+    town = (state.get("regions") or {}).get(market, {}).get("name", market)
+    short = town.split(",")[0]
+    label = product.replace("_", " ")
+    return "%d %s %s notes (%s %s)" % (count, short, label, year, tier)
+
+
+def _compress_notes(state):
+    """Keep the tape playable. Troubled notes stay named; clean current
+    notes of the same vintage collapse into a counted strip."""
+    cfg = state["bank"]["loans"]
+    notes = cfg.setdefault("notes", [])
+    named = [n for n in notes if n.get("kind") != "strip"]
+    if len(named) <= MAX_NAMED_NOTES:
+        return
+    groups = {}
+    for n in named:
+        if n.get("status") != "current":
+            continue
+        key = _pool_key(n["product"], n["market"], n["tier"], n["vint"])
+        groups.setdefault(key, []).append(n)
+    ranked = sorted(groups.items(), key=lambda kv: -len(kv[1]))
+    drop = set()
+    for key, group in ranked:
+        named_left = len(named) - len(drop)
+        if named_left <= MAX_NAMED_NOTES:
+            break
+        if len(group) < 3:
+            continue
+        bal = sum(n["balance"] for n in group)
+        if bal <= 0:
+            continue
+        rate_w = sum(n["balance"] * n["rate"] for n in group)
+        qual_w = sum(n["balance"] * n.get("quality", 1.0) for n in group)
+        age = max(n.get("age_m", 0) for n in group)
+        product, market, tier, year = key
+        rec = _new_note(cfg, product, market, tier, year, bal,
+                        rate_w / bal, qual_w / bal, age, kind="strip",
+                        count=sum(n.get("count", 1) for n in group),
+                        name=_strip_label(state, sum(n.get("count", 1) for n in group),
+                                          product, market, tier, year))
+        notes.append(rec)
+        drop.update(id(x) for x in group)
+        named = [n for n in named if id(n) not in drop]
+    if drop:
+        cfg["notes"] = [n for n in notes if id(n) not in drop]
+
+
+def ensure_notes(state):
+    """Old saves and tests that booked pools directly still get a tape."""
+    cfg = state["bank"]["loans"]
+    cfg.setdefault("notes", [])
+    cfg.setdefault("next_note_id", 1)
+    cfg.setdefault("stances", {p: infer_stance(cfg, p) for p in PRODUCTS})
+    have = set()
+    for n in cfg["notes"]:
+        have.add(_pool_key(n["product"], n["market"], n["tier"], n["vint"]))
+    for p in cfg["pools"]:
+        if p["balance"] <= 0:
+            continue
+        key = _pool_key(p["product"], p["market"], p["tier"], p["vint"])
+        if key in have:
+            continue
+        issue_notes(state, p["product"], p["market"], p["tier"], p["vint"],
+                    p["balance"], p["rate"], p.get("quality", 1.0),
+                    age_m=p.get("age_m", 0))
+        have.add(key)
+    sync_notes_to_pools(cfg)
+
+
+def sync_notes_to_pools(cfg):
+    """Tape dollars follow the vintage pools after paydown, sale, charge-off."""
+    notes = cfg.setdefault("notes", [])
+    pools = {}
+    for p in cfg["pools"]:
+        if p["balance"] > 0:
+            pools[_pool_key(p["product"], p["market"], p["tier"], p["vint"])] = p
+    by_key = {}
+    for n in notes:
+        key = _pool_key(n["product"], n["market"], n["tier"], n["vint"])
+        if key in pools:
+            by_key.setdefault(key, []).append(n)
+    out = []
+    for key, pool in pools.items():
+        group = by_key.get(key) or []
+        if not group:
+            continue
+        tot = sum(max(0, int(n.get("balance") or 0)) for n in group)
+        if tot <= 0:
+            continue
+        acc = 0
+        kept = []
+        for i, n in enumerate(group):
+            if i == len(group) - 1:
+                n["balance"] = pool["balance"] - acc
+            else:
+                n["balance"] = int(n["balance"] * pool["balance"] / tot)
+                acc += n["balance"]
+            n["age_m"] = int(pool.get("age_m") or n.get("age_m") or 0)
+            n["rate"] = pool.get("rate", n.get("rate"))
+            if n["balance"] > 0:
+                kept.append(n)
+        _assign_note_status(kept, pool)
+        out.extend(kept)
+    cfg["notes"] = out
+
+
+def _assign_note_status(notes, pool):
+    ranked = sorted(notes, key=lambda n: -n["balance"])
+    buckets = [
+        ("npl", int(pool["balance"] * pool.get("npl", 0.0))),
+        ("d90", int(pool["balance"] * pool.get("d90", 0.0))),
+        ("d60", int(pool["balance"] * pool.get("d60", 0.0))),
+        ("d30", int(pool["balance"] * pool.get("d30", 0.0))),
+    ]
+    for n in ranked:
+        n["status"] = "current"
+    for status, dollars in buckets:
+        left = dollars
+        for n in ranked:
+            if left <= 0:
+                break
+            if n["status"] != "current":
+                continue
+            n["status"] = status
+            left -= n["balance"]
+
+
+def note_tape_total(cfg):
+    return sum(int(n.get("balance") or 0) for n in cfg.get("notes") or [])
+
+
+def loan_tape(state, product=None, status=None, market=None, offset=0, limit=80):
+    """Every living note plus every living named credit."""
+    ensure_notes(state)
+    cfg = state["bank"]["loans"]
+    regions = state.get("regions") or {}
+    rows = []
+    for n in cfg.get("notes") or []:
+        if n.get("balance", 0) <= 0:
+            continue
+        rows.append(_tape_row(n, regions, kind=n.get("kind") or "note"))
+    for l in cfg.get("large") or []:
+        if l.get("status") in ("paid", "defaulted", "sold"):
+            continue
+        if int(l.get("balance") or 0) <= 0:
+            continue
+        rows.append(_tape_row(l, regions, kind="large"))
+    if product:
+        rows = [r for r in rows if r["product"] == product]
+    if market:
+        rows = [r for r in rows if r["market"] == market]
+    if status:
+        rows = [r for r in rows if r["status"] == status]
+    rank = {"npl": 0, "d90": 1, "d60": 2, "d30": 3, "current": 4}
+    rows.sort(key=lambda r: (rank.get(r["status"], 9), -r["balance"], r["name"]))
+    offset = max(0, int(offset or 0))
+    limit = max(1, min(200, int(limit or 80)))
+    named = sum(1 for r in rows if r["kind"] == "note")
+    strips = sum(1 for r in rows if r["kind"] == "strip")
+    larges = sum(1 for r in rows if r["kind"] == "large")
+    return {
+        "rows": rows[offset:offset + limit],
+        "total": len(rows),
+        "named": named, "strips": strips, "large": larges,
+        "dollars": sum(r["balance"] for r in rows),
+        "offset": offset, "limit": limit,
+    }
+
+
+def _tape_row(rec, regions, kind):
+    mid = rec.get("market")
+    return {
+        "id": rec.get("id"), "kind": kind,
+        "count": int(rec.get("count") or (1 if kind != "strip" else 0)),
+        "name": rec.get("name") or "Loan",
+        "product": rec.get("product"),
+        "market": mid,
+        "market_name": (regions.get(mid) or {}).get("name", mid),
+        "balance": int(rec.get("balance") or 0),
+        "orig_amount": int(rec.get("orig_amount") or rec.get("balance") or 0),
+        "rate": rec.get("rate") or 0,
+        "tier": rec.get("tier") or "B",
+        "status": rec.get("status") or "current",
+        "vint": str(rec.get("vint") or rec.get("orig_year") or ""),
+        "age_m": int(rec.get("age_m") or 0),
+    }
+
+
+def _product_share_pct(cfg, product):
+    tot = total_loans(cfg)
+    if tot <= 0:
+        return 1
+    bal = sum(p["balance"] for p in cfg["pools"] if p["product"] == product)
+    bal += sum(l["balance"] for l in cfg["large"]
+               if l.get("product") == product
+               and l.get("status") not in ("paid", "defaulted", "sold"))
+    return max(1, int(round(100.0 * bal / tot)))
+
+
+def infer_stance(cfg, product):
+    stored = (cfg.get("stances") or {}).get(product)
+    sp = int(cfg["spreads"].get(product, 0))
+    st = int(cfg["standards"].get(product, 2))
+    if stored in STANCES:
+        spec = STANCES[stored]
+        if sp == spec["spread"] and st == spec["standards"]:
+            return stored
+    for name, spec in STANCES.items():
+        if sp == spec["spread"] and st == spec["standards"]:
+            return name
+    return "custom"
+
+
+def preview_loan_stance(state, product, stance):
+    """What Hunt/Starve will do. Does not write the box."""
+    if product not in PRODUCTS:
+        return "unknown product"
+    if stance not in STANCES:
+        return "stance must be starve, hold, grow, or hunt"
+    cfg = state["bank"]["loans"]
+    spec = STANCES[stance]
+    cur_sp = int(cfg["spreads"].get(product, 0))
+    cur_st = int(cfg["standards"].get(product, 2))
+    d_sp = spec["spread"] - cur_sp
+    price_mult = max(0.15, min(2.6, 2.718281828 ** (-d_sp / 10000.0 / 0.01 * 0.55)))
+    tight_now = 1.30 - 0.185 * cur_st
+    tight_new = 1.30 - 0.185 * spec["standards"]
+    vol = price_mult * (tight_new / max(0.01, tight_now))
+    q_now = 1.45 - 0.20 * cur_st
+    q_new = 1.45 - 0.20 * spec["standards"]
+    cap = _product_share_pct(cfg, product) if stance in ("starve", "hold") else 0
+    labels = {"starve": "Starve", "hold": "Hold", "grow": "Grow", "hunt": "Hunt"}
+    cap_txt = (" Cap this line at %d%% of loans." % cap) if cap else " No concentration cap."
+    q_txt = ("future losses on loans written FROM NOW ON %s."
+             % ("unchanged" if abs(q_new / q_now - 1) < 0.02
+                else ("about %.0f%% %s" % (abs(q_new / q_now - 1) * 100,
+                                           "higher" if q_new > q_now else "lower"))))
+    owner = (
+        "%s %s: new-loan volume %s vs today, each new loan %s%dbp vs the street, "
+        "%s%s Loans already booked keep their rate and standards."
+        % (labels[stance], product.replace("_", " "),
+           ("%+d%%" % int(round((vol - 1) * 100))),
+           "+" if spec["spread"] >= 0 else "", spec["spread"],
+           q_txt, cap_txt))
+    return {
+        "product": product, "stance": stance,
+        "spread": spec["spread"], "standards": spec["standards"],
+        "limit": cap, "vol_ratio": round(vol, 3),
+        "quality_ratio": round(q_new / max(0.01, q_now), 3),
+        "owner": owner, "can_apply": True,
+    }
+
+
+def set_loan_stance(state, product, stance):
+    prev = preview_loan_stance(state, product, stance)
+    if isinstance(prev, str):
+        return prev
+    cfg = state["bank"]["loans"]
+    cfg.setdefault("stances", {})[product] = stance
+    cfg["spreads"][product] = prev["spread"]
+    cfg["standards"][product] = prev["standards"]
+    cfg["limits"][product] = prev["limit"]
+    return {
+        "product": product, "stance": stance,
+        "spread": prev["spread"], "standards": prev["standards"],
+        "limit": prev["limit"],
+        "message": prev["owner"],
+    }
+
+
+def product_mix(state):
+    """Current book mix for the Lending bar."""
+    cfg = state["bank"]["loans"]
+    stats = portfolio_stats(state)
+    tot = max(1, total_loans(cfg))
+    out = []
+    for p in PRODUCTS:
+        st = stats.get(p) or {"balance": 0, "npl": 0, "d3090": 0}
+        if p not in (state["bank"].get("products_enabled") or PRODUCTS) and st["balance"] <= 0:
+            continue
+        out.append({
+            "product": p,
+            "balance": st["balance"],
+            "npl": st.get("npl", 0),
+            "d3090": st.get("d3090", 0),
+            "pct": round(st["balance"] / tot, 4),
+            "stance": infer_stance(cfg, p),
+            "spread": int(cfg["spreads"].get(p, 0)),
+            "standards": int(cfg["standards"].get(p, 2)),
+            "limit": int(cfg["limits"].get(p, 0)),
+        })
+    return out
 
 
 def total_loans(cfg):
@@ -520,7 +920,7 @@ def originate_month(state, rng):
                                "Mortgage banking: loans sold to secondary market",
                                [["1000", gain, 0], ["4160", 0, gain]], tag="loan")
                 if amt > 0:
-                    add_to_pool(cfg, product, market_id, tier, year, amt, rate, quality)
+                    book_flow(state, product, market_id, tier, year, amt, rate, quality)
                     originated[product] = originated.get(product, 0) + amt
     total_orig = sum(originated.values())
     if total_orig > 0:
@@ -970,6 +1370,7 @@ def step_month_credit(state, rng):
 
     _step_oreo(state, rng)
     _prune_pools(state, cfg)
+    sync_notes_to_pools(cfg)
     return events
 
 
@@ -1396,6 +1797,7 @@ def sell_loans(state, kind, product=None, market=None,
         if not strip or strip["performing"] < par:
             return "the book shrank — preview again"
         taken = _take_from_pools(strip["pools"], par)
+        sync_notes_to_pools(bank["loans"])
         if taken < par:
             return "could not lift a clean performing strip that size"
     lines = [["1000", proceeds, 0], ["1300", 0, par]]
