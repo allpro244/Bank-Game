@@ -446,6 +446,24 @@ def _closing_line(state, kind, years, r):
     return "After %.1f years, the story of %s ends here." % (years, name)
 
 
+def _digest_lending(state):
+    recap = (state.get("bank") or {}).get("loans", {}).get("last_month_book")
+    if not recap:
+        return None
+    return {
+        "month": recap.get("month"),
+        "owner": recap.get("owner"),
+        "new_count": recap.get("new_count", 0),
+        "new_dollars": recap.get("new_dollars", 0),
+        "new": (recap.get("new") or [])[:12],
+        "declined": (recap.get("declined") or [])[:6],
+        "status_changes": (recap.get("status_changes") or [])[:6],
+        "paid_off": (recap.get("paid_off") or [])[:6],
+        "principal": recap.get("principal", 0),
+        "chargeoffs": recap.get("chargeoffs", 0),
+    }
+
+
 def compose_digest(state):
     """One month, one page. Dashboard reads the latest."""
     m = state["metrics"][-1] if state["metrics"] else {}
@@ -490,4 +508,6 @@ def compose_digest(state):
         "exam": exam,
         "window": state["bank"]["funding"].get("discount_window_uses", 0),
         "fraud": fraud_n,
+        "lending": (state["bank"]["loans"].get("last_month_book") or {}).get("owner"),
+        "lending_book": _digest_lending(state),
     }

@@ -189,6 +189,7 @@ class Game:
                 "credit_box": LN.credit_box(s),
                 "hire_preview": LN.preview_hire_lender(s),
                 "loan_sales": LN.sellable_strips(s),
+                "month_book": bank["loans"].get("last_month_book"),
                 "mix": LN.product_mix(s),
                 "stances": {p: LN.infer_stance(bank["loans"], p)
                             for p in bank["products_enabled"]},

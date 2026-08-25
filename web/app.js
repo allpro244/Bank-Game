@@ -682,6 +682,12 @@ function renderDigest(d) {
     </div>`,
     d.local ? `<div style="margin-top:6px">${esc(d.local)}</div>` : '',
     d.exam ? `<div class="warn" style="margin-top:6px">${esc(d.exam)}</div>` : '',
+    d.lending ? `<div style="margin-top:8px">${esc(d.lending)}</div>` : '',
+    d.lending_book && (d.lending_book.new || []).length
+      ? `<div class="sub" style="margin-top:4px">${(d.lending_book.new || []).slice(0, 8).map(n =>
+          `${esc(n.name)}${(n.count || 1) > 1 ? ' ×' + n.count : ''} ${fm(n.amount)}`).join(' · ')}${
+          (d.lending_book.new_count || 0) > 8 ? ' · …' : ''} — full list on Lending.</div>`
+      : '',
     d.window ? `<div class="sub">Window used ${d.window} time${d.window === 1 ? '' : 's'} this charter.</div>` : '',
     d.fraud ? `<div class="sub">${d.fraud} fraud case${d.fraud === 1 ? '' : 's'} still open.</div>` : '',
   ];
@@ -795,6 +801,7 @@ async function tabLending(m) {
       ${card('Monthly capacity', fmc(d.capacity), 'originated ' + fmc(d.originated_mtd))}
       ${card('Pending approvals', String(d.queue.length))}
     </div>
+    ${renderMonthBook(d.month_book)}
 
     <div class="grid g2">
     <div class="panel">
@@ -890,6 +897,34 @@ async function tabLending(m) {
       <h3>The tape — every loan on the books</h3>
       ${renderTape(d, prods)}
     </div>`;
+}
+
+function renderMonthBook(b) {
+  if (!b) return `<div class="panel" style="margin-top:12px">
+    <h3>Last month on the tape</h3>
+    <span class="sub">Advance a month. You will see every note that booked, declined, paid off, or went delinquent.</span>
+  </div>`;
+  const names = (b.new || []).map(n => `<tr class="click" onclick='showNote(${jattr({
+      ...n, balance: n.amount, rate: 0, status: "current",
+      market_name: n.market_name, vint: ""})})'>
+      <td>${esc(n.name)}${(n.count || 1) > 1 ? ` <span class="sub">×${n.count}</span>` : ''}</td>
+      <td>${PRODUCT_LABELS[n.product] || n.product || ''}</td>
+      <td>${esc(n.market_name || n.market || '')}</td>
+      <td class="r">${fm(n.amount)}</td>
+      <td>${esc(n.tier || '')}</td></tr>`).join('');
+  const extra = [];
+  (b.declined || []).forEach(n => extra.push(`Declined ${esc(n.name)} (${fm(n.amount)})`));
+  (b.sold || []).forEach(n => extra.push(`Sold ${esc(n.name)} (${fm(n.amount)})`));
+  (b.paid_off || []).forEach(n => extra.push(`Left the book: ${esc(n.name)}`));
+  (b.status_changes || []).forEach(n => extra.push(`${esc(n.name)}: ${esc(n.from_status || 'current')} → ${esc(n.status)}`));
+  return `<div class="panel" style="margin-top:12px">
+    <h3>Last month on the tape — ${esc(b.month || '')}</h3>
+    <div>${esc(b.owner || '')}</div>
+    ${names ? `<table style="margin-top:8px"><tr><th>Borrower</th><th>Product</th><th>Town</th>
+      <th class="r">Amount</th><th>Tier</th></tr>${names}</table>` : ''}
+    ${b.new_more ? `<div class="sub">${b.new_more} more new notes on the tape below.</div>` : ''}
+    ${extra.length ? `<div class="sub" style="margin-top:6px">${extra.slice(0, 12).join(' · ')}</div>` : ''}
+  </div>`;
 }
 
 const STANCE_META = {
