@@ -111,6 +111,19 @@ select { width: auto; font-family: inherit; }
 .ctl { display: inline-flex; align-items: center; gap: 6px; margin: 2px 8px 2px 0; }
 .ctl label { color: var(--dim); font-size: 11px; }
 
+.mixbar { display: flex; height: 16px; border-radius: 4px; overflow: hidden;
+          background: #0a0e13; border: 1px solid var(--line); margin: 6px 0 8px; }
+.mixbar i { display: block; height: 100%; min-width: 2px; }
+.mixleg { display: flex; flex-wrap: wrap; gap: 8px 14px; margin-bottom: 8px; }
+.mixleg span { color: var(--dim); font-size: 11px; }
+.mixleg b { color: var(--fg); font-weight: 600; }
+.stances { display: inline-flex; gap: 3px; }
+.stances button.on { font-weight: 700; }
+.stances button.starve.on { background: #4b1f1f; border-color: var(--red); color: #ffd9d9; }
+.stances button.hold.on { background: #16304d; border-color: var(--blue); color: #d6e8ff; }
+.stances button.grow.on { background: #1d4f38; border-color: var(--accent); color: #d9ffe9; }
+.stances button.hunt.on { background: #4a3a14; border-color: var(--amber); color: #ffe9b0; }
+
 canvas.chart { width: 100%; background: #0a0e13; border: 1px solid var(--line);
                border-radius: 4px; }
 
