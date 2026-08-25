@@ -1516,7 +1516,7 @@ async function confirmListCommon() {
     if (ok) act('list_common', {});
   } catch (e) { toast(String(e), true); }
 }
-function confirmRaiseCommon() {
+async function confirmRaiseCommon() {
   const amt = moneyIn('cap-amt');
   if (!amt) return;
   try {
