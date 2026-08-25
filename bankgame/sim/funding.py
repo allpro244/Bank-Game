@@ -10,6 +10,8 @@ regulators notice).
 Capital: common raises, preferred issuance, dividends, buybacks.
 """
 
+import datetime
+
 from . import ledger as L
 from .economy import yield_at
 
@@ -262,6 +264,88 @@ def step_month(state, rng):
     return events
 
 
+def _money(cents):
+    return f"{int(cents) // 100:,}"
+
+
+def _prev_business_day(d):
+    prev = d - datetime.timedelta(days=1)
+    while prev.weekday() >= 5:
+        prev -= datetime.timedelta(days=1)
+    return prev
+
+
+def _month_open_morning(state):
+    """True on the first business day of a month — the morning the
+    previous month's originations, opex, and deposit runoff just posted."""
+    d = datetime.date.fromisoformat(state["time"]["date"])
+    prev = _prev_business_day(d)
+    return prev.month != d.month or prev.year != d.year
+
+
+def _overnight_shortfall_copy(state, need):
+    """Honest card copy. Does not change funding or origination."""
+    loans = state["bank"]["loans"]
+    originated = int((loans.get("stats") or {}).get("originated_mtd") or 0)
+    book = loans.get("last_month_book") or {}
+    if originated <= 0:
+        originated = int(book.get("new_dollars") or 0)
+    notes = int(book.get("new_count") or 0)
+    led = state["bank"]["ledger"]["balances"]
+    afs = max(0, int(led.get("1200") or 0))
+    htm = max(0, int(led.get("1210") or 0))
+    bonds = afs + htm
+    just_booked = _month_open_morning(state) and originated > 0
+
+    if just_booked:
+        cause = ("We just funded $%s of new notes and the vault is empty."
+                 % _money(originated))
+        if notes:
+            owner_summary = (
+                "We just booked $%s of new loans this morning (%s notes) "
+                "and spendable cash is gone."
+                % (_money(originated), f"{notes:,}"))
+        else:
+            owner_summary = (
+                "We just booked $%s of new loans this morning and spendable "
+                "cash is gone." % _money(originated))
+        owner_title = "Vault empty after this morning's new loans"
+    else:
+        cause = None
+        owner_summary = "Spendable cash is gone. Bonds do not settle this hole."
+        owner_title = "Overnight cash shortfall"
+
+    bits = []
+    if cause:
+        bits.append(cause)
+    if bonds > 0:
+        bits.append(
+            "The $%s bond book does not settle this. You cannot pay a "
+            "borrower with bonds you promised to hold; sell the ones "
+            "marked for sale if you want cash without borrowing."
+            % _money(bonds))
+    bits.append(
+        "We are short $%s overnight after using vault cash, "
+        "fed-funds-sold, and balances at the Fed. The clock stops so "
+        "you can choose: draw a 3-month FHLB advance, borrow fed funds "
+        "(capped by counterparties), use the discount window, or wait — "
+        "wait covers what the fed-funds market will take, charges a "
+        "penalty on any leftover overdraft, shrinks next month's "
+        "originations once, and will not nag you every morning. Waiting "
+        "does not fill this hole.\n\n"
+        "The window is not drawn until you pick it. Examiners count "
+        "every use."
+        % _money(need))
+    return {
+        "cause": cause,
+        "owner_title": owner_title,
+        "owner_summary": owner_summary,
+        "text": "\n\n".join(bits),
+        "originated": originated if just_booked else 0,
+        "bonds": bonds,
+    }
+
+
 def manage_overnight(state):
     """Called daily AFTER all flows: cover negative cash with overnight
     borrowings; sweep big surpluses into fed funds sold.
@@ -318,22 +402,18 @@ def manage_overnight(state):
             waiting = bool(wait_until and date <= wait_until
                            and need <= int(last_need * 1.5) + 50_000_00)
             if not already and not waiting:
+                copy = _overnight_shortfall_copy(state, need)
                 events.append({
                     "type": "overnight_shortfall",
                     "blocking": True,
                     "need": need,
                     "title": "Overnight cash shortfall",
-                    "text": ("We are short $%s overnight after using vault cash, "
-                             "fed-funds-sold, and balances at the Fed. The clock "
-                             "stops so you can choose: draw a 3-month FHLB advance, "
-                             "borrow fed funds (capped by counterparties), use the "
-                             "discount window, or wait — wait covers what the "
-                             "fed-funds market will take, charges a penalty on any "
-                             "leftover overdraft, shrinks originations, and will "
-                             "not nag you every morning.\n\n"
-                             "The window is not drawn until you pick it. Examiners "
-                             "count every use."
-                             % f"{need // 100:,}"),
+                    "owner_title": copy["owner_title"],
+                    "owner_summary": copy["owner_summary"],
+                    "cause": copy["cause"],
+                    "originated": copy["originated"],
+                    "bonds": copy["bonds"],
+                    "text": copy["text"],
                     "choices": ["fhlb", "fed_funds", "window", "wait"],
                 })
         elif need > 0:

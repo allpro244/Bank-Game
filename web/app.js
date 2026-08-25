@@ -2259,11 +2259,27 @@ function renderEventModal() {
       <button class="primary" onclick="eventChoice(${ev.id}, 'keep')">Keep playing</button>
       <button onclick="eventChoice(${ev.id}, 'retire')">Retire to the title screen</button></div>`;
   } else if (ev.type === 'overnight_shortfall') {
+    const title = MODE === 'owner' && ev.owner_title ? ev.owner_title : ev.title;
+    const lead = ev.cause
+      ? (MODE === 'owner' && ev.owner_summary ? ev.owner_summary : ev.cause)
+      : '';
+    let body = ev.text || '';
+    if (ev.cause && body.indexOf(ev.cause) === 0) {
+      body = body.slice(ev.cause.length).replace(/^\s+/, '');
+    }
     controls = `<div class="btnrow">
       <button class="primary" onclick="eventChoice(${ev.id}, 'fhlb')">Draw 3-month FHLB</button>
       <button onclick="eventChoice(${ev.id}, 'fed_funds')">Borrow fed funds</button>
       <button class="danger" onclick="eventChoice(${ev.id}, 'window')">Use the discount window</button>
       <button onclick="eventChoice(${ev.id}, 'wait')">Wait — shrink originations</button></div>`;
+    box.innerHTML = `<div class="modalbox">
+      <h2>${esc(title)}</h2>
+      <div class="sub">${esc(ev.date)}${pend.length > 1 ? ` · ${pend.length - 1} more waiting` : ''}</div>
+      ${lead ? `<p style="margin:8px 0 10px;font-weight:600">${esc(lead)}</p>` : ''}
+      <pre>${esc(body)}</pre>
+      ${controls}
+    </div>`;
+    return;
   } else if (ev.type === 'buyout_offer') {
     controls = `<div class="btnrow">
       <button class="danger" onclick="eventChoice(${ev.id}, 'accept')">Sell the bank</button>
