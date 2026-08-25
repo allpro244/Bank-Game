@@ -1110,6 +1110,7 @@ async function tabTreasury(m) {
       ${card(dt('liquidity'), pct(d.liquidity_ratio, 1))}
       ${s.tainted ? card('HTM STATUS', 'TAINTED', 'no more HTM purchases', 'neg') : ''}
     </div>
+    ${evePanel(d.eve)}
     <div class="grid g2">
     <div class="panel">
       <h3>Buy securities (at market yield off the live curve)</h3>
@@ -1194,6 +1195,27 @@ async function tabTreasury(m) {
             onclick="${l.cls === 'HTM' ? `if(confirm('Selling HTM taints the entire HTM book — every unrealized loss hits equity at once. Sure?'))` : ''}act('sell_security',{lot_id:${l.id}})">Sell</button></td></tr>`;
         }).join('')}</table>` : '<span class="sub">No securities. Cash is earning fed funds minus a dime.</span>'}
     </div>`;
+}
+
+function evePanel(eve) {
+  if (!eve) return '';
+  return `<div class="panel" style="margin-top:12px">
+    <h3>What a rate jump does to book value</h3>
+    <p class="stance">${esc(eve.owner)}</p>
+    <div class="kv">
+      <span class="k">Asset duration</span><span class="v">${eve.asset_duration}y</span>
+      <span class="k">Funding duration</span><span class="v">${eve.liability_duration}y</span>
+      <span class="k">Duration gap</span><span class="v">${eve.duration_gap}y</span>
+    </div>
+    <table><tr><th>Parallel shock</th><th class="r">Δ economic equity</th>
+      <th class="r">vs tangible book</th></tr>
+      ${(eve.shocks || []).map(s => `<tr>
+        <td>${s.bp > 0 ? '+' : ''}${s.bp} bp</td>
+        <td class="r ${cls(s.delta_eve)}">${fm(s.delta_eve)}</td>
+        <td class="r ${cls(s.delta_eve)}">${pct(s.pct_tbv, 1)}</td>
+      </tr>`).join('')}</table>
+    <div class="helptip">Same duration gap the examiners sketch. Pay-fixed swaps and caps damp a rising-rate hit. This is not a new exam grade — they still look at paper losses vs capital.</div>
+  </div>`;
 }
 
 /* ---------------- Operations ---------------- */
@@ -1499,6 +1521,19 @@ function confirmOpenBranch(market, source) {
   ]);
 }
 
+function mraBanner(d) {
+  const live = (d.mras || []).filter(m => m.status === 'open' || m.status === 'missed');
+  if (!live.length) return '';
+  return `<div class="banner" style="border-color:var(--warn)">
+    <b>Matters requiring attention</b>
+    ${live.map(m => {
+      const line = MODE === 'owner' ? (m.owner || m.text) : m.text;
+      const tag = m.status === 'missed' ? 'MISSED — ' : '';
+      return `<div class="sub">${tag}${esc(line)}</div>`;
+    }).join('')}
+  </div>`;
+}
+
 /* ---------------- Risk & Reg ---------------- */
 async function tabRisk(m) {
   const d = await section('risk');
@@ -1522,6 +1557,7 @@ async function tabRisk(m) {
       <b>${esc(d.exam_path.needed || '')}</b>
       ${(d.exam_path.actions || []).map(a => `<div class="sub">${esc(a)}</div>`).join('')}
     </div>` : ''}
+    ${mraBanner(d)}
     ${d.thresholds.durbin ? '<div class="sub">Regulatory tier: ' +
       ['$10B+ (Durbin/CFPB)', d.thresholds.enhanced ? '$50B+ (stress tests)' : '',
        d.thresholds.lcr ? '$100B+ (LCR)' : '', d.thresholds.gsib ? 'G-SIB' : '']
@@ -1538,6 +1574,7 @@ async function tabRisk(m) {
           ${pct(-(Math.min(0, d.aoci) + Math.min(0, d.htm_unrealized)) / Math.max(1, c.cet1), 0)}</span>
       </div>
       <div class="helptip">${durationTrapCopy()}</div>
+      ${d.eve ? `<div class="sub" style="margin-top:6px">${esc(d.eve.owner)} Open Treasury for the ±100/200/300 bp table.</div>` : ''}
       <h3>Liquidity & funding</h3>
       <div class="kv">
         <span class="k">Liquid assets / assets</span><span class="v">${pct(d.liquidity_ratio, 1)}</span>

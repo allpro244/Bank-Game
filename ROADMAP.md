@@ -642,8 +642,8 @@ as project work. Do not start H to avoid finishing A or I.
 | --- | --- | --- |
 | Per-market deposit pricing | A1 is sane | **Shipped with listing / weight-class towns** — franchise offset + town override; Desk card when one town leaks |
 | Competitor M&A vs your targets | Needs A3 pipeline | Rivals can buy the bank you were sizing |
-| Examiner MRAs with deadlines | Needs B7 exam as set piece | “Raise liquidity ratio above 10% by September” |
-| EVE / ±100–300 bp dashboard | Needs B3 owner labels | Treasury panel, not a new tab |
+| Examiner MRAs with deadlines | Needs B7 exam as set piece | **Shipped** — 1–2 measurable items after a 3+; miss grades M once; a 2 writes none |
+| EVE / ±100–300 bp dashboard | Needs B3 owner labels | **Shipped** — duration-gap table on Treasury; one sentence on Risk |
 | Named officers (CFO, CCO) | After E3 relationships | Traits that nudge capacity, exam M, defects |
 | Holding-company double leverage | Late-game only | Unlock with a D2 regional goal |
 | Business lines (trust, insurance, merchant, correspondent, IB) | Currently a click + P&L drip | Each line gets **one** recurring decision or it stays hidden from the first-hour UI |

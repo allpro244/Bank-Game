@@ -255,6 +255,7 @@ class Game:
                 "aoci": -ledger["balances"]["3200"],
                 "overnight_policy": bank["funding"].get("overnight_policy", "ask"),
                 "raise_preview": FUND.preview_raise_common(s, 2_000_000_00),
+                "eve": securities.eve_report(s),
             }
 
         if name == "ops":
@@ -302,6 +303,8 @@ class Game:
                 "exam_path": (REG.exam_recovery_advice(s)
                               if s["regulation"]["camels"]["composite"] >= 3
                               else None),
+                "mras": REG.live_mras(s["regulation"]),
+                "eve": securities.eve_report(s),
                 "orders": s["regulation"]["orders"],
                 "cra": s["regulation"]["cra"],
                 "months_to_exam": s["regulation"]["months_to_exam"],

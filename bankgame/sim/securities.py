@@ -353,3 +353,109 @@ def summary(state):
             "duration": round(dur, 2), "count": len(lots),
             "tainted": bank["securities"]["htm_tainted"],
             "yield": round(sum(l["par"] * l["coupon"] for l in lots) / tot_par, 5) if tot_par else 0}
+
+
+# Deposit product durations (years). Checking barely moves; long CDs do.
+_DEP_DUR = {
+    "checking": 0.08, "checking_int": 0.20, "savings": 0.45,
+    "money_market": 0.22, "cd_3m": 0.22, "cd_1y": 0.85,
+    "cd_2y": 1.60, "cd_5y": 3.10,
+}
+
+
+def _loan_mod_duration(product):
+    from .loans import FLOATING, TERM_M
+    if product == "credit_card":
+        return 0.15
+    if product in FLOATING:
+        return 0.30
+    if product == "mortgage":
+        return 6.2
+    term_y = TERM_M.get(product, 60) / 12.0
+    return max(0.15, min(8.0, term_y * 0.48))
+
+
+def eve_report(state):
+    """Duration-gap EVE under parallel ±100/200/300 bp shocks.
+
+    Display only — does not grade the exam or post to the books.
+    Owner sentence: what a 2% rate jump does to tangible book.
+    """
+    from . import deposits as DEP
+    from . import loans as LN
+    from . import ledger as LL
+
+    bank = state["bank"]
+    econ = state["economy"]
+    ledger = bank["ledger"]
+
+    rsa = 0
+    rsa_dd = 0.0
+    cash = (ledger["balances"]["1000"] + ledger["balances"]["1010"]
+            + ledger["balances"]["1100"])
+    rsa += cash
+    rsa_dd += cash * 0.02
+    for lot in bank["securities"]["lots"]:
+        rsa += lot["mv"]
+        rsa_dd += lot["mv"] * duration_lot(lot, econ)
+    for prod, d in LN.portfolio_stats(state).items():
+        rsa += d["balance"]
+        rsa_dd += d["balance"] * _loan_mod_duration(prod)
+
+    rsl = 0
+    rsl_dd = 0.0
+    tots = DEP.totals(bank["deposits"])
+    for p in DEP.PRODUCTS:
+        rsl += tots[p]
+        rsl_dd += tots[p] * _DEP_DUR[p]
+    fund = bank["funding"]
+    for adv in fund.get("fhlb") or []:
+        d = max(0.05, adv["months_left"] / 12.0 * 0.85)
+        rsl += adv["amount"]
+        rsl_dd += adv["amount"] * d
+    for adv in fund.get("brokered") or []:
+        d = max(0.05, adv["months_left"] / 12.0 * 0.70)
+        rsl += adv["amount"]
+        rsl_dd += adv["amount"] * d
+    for adv in fund.get("subdebt") or []:
+        d = max(0.10, adv["months_left"] / 12.0 * 0.55)
+        rsl += adv["amount"]
+        rsl_dd += adv["amount"] * d
+    overnight = max(0, -ledger["balances"]["2110"]) + max(0, -ledger["balances"]["2120"])
+    rsl += overnight
+    rsl_dd += overnight * 0.02
+
+    da = rsa_dd / rsa if rsa else 0.0
+    dl = rsl_dd / rsl if rsl else 0.0
+    gap_dollars = rsa_dd - rsl_dd
+    tbv = LL.total_equity(ledger) - ledger["balances"]["1600"]
+    hedges = bank["securities"].get("hedges") or []
+
+    shocks = []
+    for bp in (-300, -200, -100, 100, 200, 300):
+        dy = bp / 10000.0
+        delta = int(round(-dy * gap_dollars))
+        for h in hedges:
+            years = max(0.1, h["months_left"] / 12.0)
+            if h["kind"] == "pay_fixed_swap":
+                delta += int(round(h["notional"] * years * 0.80 * dy))
+            elif dy > 0:
+                delta += int(round(h["notional"] * years * 0.28 * dy))
+        shocks.append({
+            "bp": bp,
+            "delta_eve": delta,
+            "pct_tbv": round(delta / max(1, tbv), 4),
+        })
+    plus200 = next(s for s in shocks if s["bp"] == 200)
+    move = plus200["delta_eve"]
+    sign = "rises" if move > 0 else "falls" if move < 0 else "is unchanged"
+    owner = ("If rates jump 2%%, tangible book %s about $%s (%.1f%%)."
+             % (sign, f"{abs(move) // 100:,}", abs(plus200["pct_tbv"]) * 100))
+    return {
+        "asset_duration": round(da, 2),
+        "liability_duration": round(dl, 2),
+        "duration_gap": round(da - dl * (rsl / max(1, rsa)), 2),
+        "rsa": rsa, "rsl": rsl, "tbv": tbv,
+        "owner": owner,
+        "shocks": shocks,
+    }

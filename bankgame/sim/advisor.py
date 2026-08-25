@@ -849,6 +849,65 @@ def _r_market_leak(state):
               "deposits.market_offsets_bp.%s.money_market" % mid, bump)])
 
 
+def recommended_max_hold(state):
+    """Legal-lending-limit-ish hold for a book this size. Advisor only."""
+    assets = state["bank"].get("cached_assets") or 0
+    if assets <= 0:
+        assets = L.total_assets(state["bank"]["ledger"])
+    cet1 = REG.capital_ratios(state)["cet1"]
+    raw = max(int(assets * 0.04), int(cet1 * 0.15), 5_000_000_00)
+    raw = min(50_000_000_00, raw)
+    return max(5_000_000_00, (raw // 1_000_000_00) * 1_000_000_00)
+
+
+def _r_credit_box_scale(state):
+    """Seed-11 finding: a $2M hold on a grown book wakes Play until forever.
+    Recommend a raise. Never write the box or enable it."""
+    if not state["metrics"] or not state["metrics"][-1].get("earnings_ready"):
+        return None
+    assets = state["bank"].get("cached_assets") or 0
+    if assets < 80_000_000_00:
+        return None
+    hold = int(LN.credit_box(state).get("max_hold") or 2_000_000_00)
+    rec = recommended_max_hold(state)
+    if hold >= rec * 0.45 and hold > 2_500_000_00:
+        return None
+    return _card(
+        "credit_box_scale", 0, "Your credit box is still a community hold",
+        "The book is %s and the box still stops the clock on anything over %s. "
+        "Raise the hold to %s — about 4%% of assets or 15%% of capital, the "
+        "size a bank this large actually keeps. This card does not turn the "
+        "box on or approve a credit."
+        % (_fm(assets), _fm(hold), _fm(rec)),
+        "Play until is a clock. A $2M hold on an $80M book is why the desk "
+        "wakes you ten thousand times. You write the box; the advisor does not.",
+        "lending",
+        [_set("Raise hold to %s" % _fm(rec),
+              "loans.credit_box.max_hold", rec)])
+
+
+def _r_mra_due(state):
+    REG.ensure(state)
+    live = REG.live_mras(state["regulation"])
+    if not live:
+        return None
+    missed = [m for m in live if m["status"] == "missed"]
+    if not missed and state["regulation"]["months_to_exam"] > 4:
+        return None
+    sev = 2 if missed else 1
+    title = ("You missed an examiner deadline" if missed else
+             "Examiner items due in ~%d months"
+             % max(1, state["regulation"]["months_to_exam"]))
+    body = " ".join(m.get("owner") or m.get("text") or "" for m in live[:2])
+    return _card(
+        "mra_due", sev, title, body,
+        "A matter requiring attention is a measurable item with a deadline. "
+        "Miss it and Management takes a +1 next visit. Meet it and it goes "
+        "away. An MOU is not an MRA.",
+        "risk",
+        [_goto("Open Risk & Reg", "risk")])
+
+
 def _r_list_common(state):
     from . import funding as FUND
     prev = FUND.listing_preview(state)
@@ -891,10 +950,10 @@ def _r_digital(state):
 
 
 _RULES = [
-    _r_run_defense, _r_camels_repair, _r_capital_repair, _r_rate_risk, _r_bsa_weak,
+    _r_run_defense, _r_camels_repair, _r_mra_due, _r_capital_repair, _r_rate_risk, _r_bsa_weak,
     _r_deposit_lag, _r_funding_stretch, _r_sell_mortgages, _r_late_cycle, _r_recession_cre,
     _r_hire_lender, _r_second_county, _r_open_second_office, _r_digital,
-    _r_market_leak, _r_list_common,
+    _r_market_leak, _r_list_common, _r_credit_box_scale,
     _r_excess_cash, _r_uninsured_watch, _r_exam_prep,
     _r_fraud_weak, _r_core_old, _r_brand_decay, _r_hoarding,
 ]
