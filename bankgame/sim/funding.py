@@ -301,7 +301,6 @@ def manage_overnight(state):
         if policy == "auto" and need >= 100_000_00:
             cap = fhlb_capacity(state)
             take = min(need, cap)
-            take = (take // 10_000_00) * 10_000_00
             if take >= 100_000_00:
                 res = take_fhlb(state, take, OVERNIGHT_FHLB_MONTHS)
                 if not isinstance(res, str):
@@ -337,20 +336,22 @@ def manage_overnight(state):
                     "choices": ["fhlb", "fed_funds", "window", "wait"],
                 })
         elif need > 0:
-            # auto: last resort — books stay non-negative, every use is logged
-            L.post(ledger, date, "DISCOUNT WINDOW borrowing",
-                   [["1000", need, 0], ["2120", 0, need]], tag="fund")
-            state["bank"]["funding"]["discount_window_uses"] += 1
-            used_window = need
-            events.append({
-                "type": "liquidity",
-                "blocking": False,
-                "title": "Discount window used",
-                "text": ("Auto overnight policy borrowed at the Fed's discount "
-                         "window to cover a cash shortfall ($%s). Lifetime "
-                         "window uses: %d."
-                         % (f"{used_window // 100:,}",
-                            state["bank"]["funding"]["discount_window_uses"]))})
+            # Auto: leftover crumbs stay as a penalized overdraft — examiners
+            # count window uses, not a $40k hole after FHLB/FF did the work.
+            if need >= 250_000_00:
+                L.post(ledger, date, "DISCOUNT WINDOW borrowing",
+                       [["1000", need, 0], ["2120", 0, need]], tag="fund")
+                state["bank"]["funding"]["discount_window_uses"] += 1
+                used_window = need
+                events.append({
+                    "type": "liquidity",
+                    "blocking": False,
+                    "title": "Discount window used",
+                    "text": ("Auto overnight policy borrowed at the Fed's discount "
+                             "window to cover a cash shortfall ($%s). Lifetime "
+                             "window uses: %d."
+                             % (f"{used_window // 100:,}",
+                                state["bank"]["funding"]["discount_window_uses"]))})
     cash = ledger["balances"]["1000"]
     if cash >= 0:
         if cash < target_cash:
@@ -397,9 +398,22 @@ def take_fed_funds(state, amount, memo="Fed funds purchased (overnight)"):
 
 # --------------------------------------------------------------- capital
 
-def raise_common(state, amount):
+def _through_cycle_roe(state):
+    """Don't price a raise off one red year or a book that is not ready."""
+    m = state["metrics"][-1] if state.get("metrics") else {}
+    if not m.get("earnings_ready"):
+        return 0.08
+    roe = state["bank"].get("roe_ttm")
+    if roe is None:
+        return 0.08
+    return max(0.0, float(roe))
+
+
+def common_raise_terms(state, amount):
+    """Price a common raise without posting. Returns a dict or an error string."""
     bank = state["bank"]
     reg = state["regulation"]
+    amount = int(amount)
     if amount < 500_000_00:
         return "minimum raise $500,000"
     equity = L.total_equity(bank["ledger"])
@@ -408,28 +422,62 @@ def raise_common(state, amount):
     if amount > cap:
         return "investors will not take a raise above %.0fx tangible book ($%s cap)" % (
             MAX_COMMON_RAISE_MULT, f"{cap // 100:,}")
-    # pricing: healthy banks raise near/above book; sick banks deeply dilutive
     health = 1.0
-    if reg["camels"]["composite"] >= 4:
+    cam = int(reg["camels"]["composite"])
+    if cam >= 4:
         health = 0.55
-    elif reg["camels"]["composite"] == 3:
+    elif cam == 3:
         health = 0.8
     if state["economy"]["credit_stress"] > 0.4:
         health *= 0.8
-    # A raise that is large vs book clears at a worse price.
     size_hit = min(1.0, 0.55 + 0.45 * (tbv / max(1, amount)))
-    price_to_book = max(0.3, min(2.2, 1.15 * health * (1.0 + bank.get("roe_ttm", 0.08)) * size_hit))
-    shares_out = bank["shares"]
+    roe = _through_cycle_roe(state)
+    raw = 1.15 * health * (1.0 + roe) * size_hit
+    floor = 1.0 if cam <= 2 else 0.85 if cam == 3 else 0.70
+    price_to_book = max(floor, min(2.2, raw))
+    shares_out = max(1, bank["shares"])
     px = max(1, int(tbv / shares_out * price_to_book))
     new_shares = amount // px
     fees = int(amount * 0.05)
     if fees >= max(1, equity):
         return "underwriting fee would wipe out equity"
+    from .regulation import capital_ratios, pca_category
+    r = capital_ratios(state)
+    new_cet1 = r["cet1"] + amount - fees
+    new_assets = r["assets"] + amount - fees
+    new_rwa = r["rwa"]
+    return {
+        "amount": amount, "fees": fees, "net": amount - fees,
+        "price_to_book": round(price_to_book, 2),
+        "shares_issued": new_shares, "price_per_share": px,
+        "tbv": tbv, "cap": cap,
+        "proforma_cet1": round(new_cet1 / max(1, new_rwa), 5),
+        "proforma_leverage": round(new_cet1 / max(1, new_assets), 5),
+        "pca": pca_category(dict(r, cet1=new_cet1, cet1_ratio=new_cet1 / max(1, new_rwa),
+                                 leverage_ratio=new_cet1 / max(1, new_assets),
+                                 tang_equity_ratio=new_cet1 / max(1, new_assets),
+                                 tier1_ratio=new_cet1 / max(1, new_rwa),
+                                 total_ratio=new_cet1 / max(1, new_rwa))),
+    }
+
+
+def preview_raise_common(state, amount):
+    return common_raise_terms(state, amount)
+
+
+def raise_common(state, amount):
+    terms = common_raise_terms(state, amount)
+    if isinstance(terms, str):
+        return terms
+    bank = state["bank"]
     L.post(bank["ledger"], state["time"]["date"],
-           "Common equity raised ($%s at %.2fx book)" % (f"{amount // 100:,}", price_to_book),
-           [["1000", amount - fees, 0], ["5170", fees, 0], ["3000", 0, amount]], tag="cap")
-    bank["shares"] += new_shares
-    return {"shares_issued": new_shares, "price_to_book": round(price_to_book, 2)}
+           "Common equity raised ($%s at %.2fx book)" % (
+               f"{terms['amount'] // 100:,}", terms["price_to_book"]),
+           [["1000", terms["net"], 0], ["5170", terms["fees"], 0],
+            ["3000", 0, terms["amount"]]], tag="cap")
+    bank["shares"] += terms["shares_issued"]
+    return {"shares_issued": terms["shares_issued"],
+            "price_to_book": terms["price_to_book"]}
 
 
 def issue_preferred(state, amount):

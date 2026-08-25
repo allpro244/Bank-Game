@@ -106,8 +106,38 @@ KIND_ASSET_MULT = {
     "metro": 0.40, "money_center": 0.20,
 }
 
+# A branch serves a trade area, not the entire metro pool. Rural towns
+# are the whole town. Dallas is a few miles, not $100B.
+CATCHMENT = {
+    "rural": None,
+    "small_metro": 2_500_000_000_00,
+    "suburb": 1_800_000_000_00,
+    "metro": 1_200_000_000_00,
+    "money_center": 900_000_000_00,
+}
 
-def presence_score(state, market_id):
+
+def office_count(state, market_id):
+    return sum(1 for b in state["bank"]["ops"]["branches"]
+               if b.get("market") == market_id and b.get("open"))
+
+
+def trade_pool(state, market_id, extra_offices=0):
+    """Deposit pool this franchise can actually contest in `market_id`."""
+    region = state["regions"][market_id]
+    pool = max(1, region["deposit_pool"])
+    cap_one = CATCHMENT.get(region["kind"])
+    if not cap_one:
+        return pool
+    n = office_count(state, market_id) + extra_offices
+    if n <= 0:
+        n = 1
+    digital = state["bank"]["ops"].get("digital_level", 0)
+    catch = int(cap_one * n * (1.0 + 0.12 * digital))
+    return max(1, min(pool, catch))
+
+
+def presence_score(state, market_id, extra_offices=0):
     """How visible/reachable the bank is in a market: branches + digital."""
     bank = state["bank"]
     branches = [b for b in bank["ops"]["branches"]
@@ -116,6 +146,7 @@ def presence_score(state, market_id):
     score = 0.0
     for b in branches:
         score += 1.0 * (0.8 + 0.1 * b.get("quality", 2))
+    score += extra_offices * 1.0
     score = score ** 0.72 if score > 0 else 0.0     # diminishing returns
     score += digital * 0.35                          # digital reaches everywhere
     return score
@@ -156,10 +187,10 @@ def market_maturity(state, market_id):
     return min(1.0, (months_in_market(state, market_id) + 4) / 30.0)
 
 
-def size_share_cap(state, market_id, assets=None):
-    """Max share of the local pool a bank this size can hold."""
+def size_share_cap(state, market_id, assets=None, extra_offices=0):
+    """Max share of the *trade* pool a bank this size can hold."""
     region = state["regions"][market_id]
-    pool = max(1, region["deposit_pool"])
+    pool = trade_pool(state, market_id, extra_offices=extra_offices)
     if assets is None:
         assets = max(1, state["bank"].get("cached_assets") or 1)
         if assets <= 1:
@@ -167,27 +198,42 @@ def size_share_cap(state, market_id, assets=None):
             assets = max(1, _L.total_assets(state["bank"]["ledger"]))
     assets = max(1, assets)
     mult = KIND_ASSET_MULT.get(region["kind"], 0.6)
-    return (assets * mult) / pool
+    n = office_count(state, market_id) + extra_offices
+    # Extra windows lift how much of the town you can actually hold.
+    # First office is 1.0× so A1 size caps do not move.
+    office_boost = min(1.75, 1.0 + 0.22 * max(0, n - 1))
+    return (assets * mult * office_boost) / pool
 
 
-def natural_share(state, market_id):
-    """Target deposit share: attractiveness, then size cap, then new-market ramp.
+def share_of_full_pool(state, market_id, extra_offices=0, maturity=None):
+    """Attractiveness vs the trade area, expressed as a share of the full pool.
 
-    A $20M bank with one new Dallas branch must not claim 8% of a $100B+
-    pool. Rural peer towns still play like a real community-bank franchise.
+    A Dallas office contests a catchment, not $100B. Size caps still apply
+    so a $20M bank cannot own the catchment overnight.
     """
     region = state["regions"][market_id]
-    pres = presence_score(state, market_id)
+    extra = extra_offices if extra_offices else 0
+    pres = presence_score(state, market_id, extra_offices=extra)
     if pres <= 0:
         return 0.0
     comp_weight = 6.0 * region["competition"]
     raw = pres / (pres + comp_weight)
-    capped = min(raw, size_share_cap(state, market_id))
-    return capped * market_maturity(state, market_id)
+    trade = trade_pool(state, market_id, extra_offices=extra)
+    capped_trade = min(raw, size_share_cap(state, market_id, extra_offices=extra))
+    full = max(1, region["deposit_pool"])
+    share = capped_trade * (trade / full)
+    if maturity is None:
+        maturity = market_maturity(state, market_id)
+    return share * maturity
+
+
+def natural_share(state, market_id):
+    """Target deposit share of the full local pool (trade-area, then size cap)."""
+    return share_of_full_pool(state, market_id)
 
 
 def year1_gather_estimate(state, market_id):
-    """Rough year-1 deposit gather (cents) if we have presence there now.
+    """Rough year-1 deposit gather (cents) if we open one more office here.
 
     Used by the branch-open preview. Same helpers as the monthly flow, so
     the UI cannot invent a different number than the engine.
@@ -195,20 +241,22 @@ def year1_gather_estimate(state, market_id):
     region = state["regions"].get(market_id)
     if region is None:
         return 0
-    # Pretend the market is 12 months old for the estimate (end of year 1),
-    # but still size-capped at today's assets.
-    pres = presence_score(state, market_id)
+    already_here = office_count(state, market_id)
+    extra = 1
+    pres = presence_score(state, market_id, extra_offices=extra)
     if pres <= 0:
-        # Preview before the branch exists: one standard branch.
         pres = 1.0 ** 0.72
     comp_weight = 6.0 * region["competition"]
     raw = pres / (pres + comp_weight)
-    capped = min(raw, size_share_cap(state, market_id))
-    share = capped * min(1.0, 16.0 / 30.0)   # ~12 months on the ramp
+    trade = trade_pool(state, market_id, extra_offices=extra)
+    capped_trade = min(raw, size_share_cap(state, market_id, extra_offices=extra))
+    # New markets ramp; a second office in a town you already serve does not.
+    ramp = 1.0 if already_here > 0 else min(1.0, 16.0 / 30.0)
+    share_trade = capped_trade * ramp
     brand = state["bank"]["ops"]["brand"].get(market_id, 8.0)
     brand_mult = 0.55 + 0.9 * (brand / 100.0)
     already = market_deposits(state, market_id)
-    target = int(region["deposit_pool"] * share * brand_mult)
+    target = int(trade * share_trade * brand_mult)
     return max(0, target - already)
 
 

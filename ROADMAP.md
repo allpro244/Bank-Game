@@ -613,7 +613,9 @@ industry goes extinct, growth economics punish staffing and metro
 entry, and a few systems still lie or crash.
 
 **Working plan:** `PLAYTEST_PLAN.md`. Do not start H to avoid
-finishing I.
+finishing I. I1–I7 land in this pass; the 60-year pack still
+has to measure whether $250B is reachable before anyone changes
+the crown or the default goal.
 
 | Item | One line |
 | --- | --- |

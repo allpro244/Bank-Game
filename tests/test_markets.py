@@ -50,9 +50,12 @@ class TestMarkets(unittest.TestCase):
         big["bank"]["cached_assets"] = 2_000_000_000_00
         cap_s = DEP.size_share_cap(small, "dallas")
         cap_b = DEP.size_share_cap(big, "dallas")
-        self.assertLess(cap_s, 0.002)
-        self.assertGreater(cap_b, 0.004)
+        # Caps are now vs the Dallas catchment, not the $100B+ pool.
+        self.assertLess(cap_s, 0.02)
+        self.assertGreater(cap_b, 0.20)
         self.assertGreater(cap_b, cap_s * 10)
+        full_s = DEP.share_of_full_pool(small, "dallas", extra_offices=1, maturity=1.0)
+        self.assertLess(full_s, 0.001)
 
     def test_preview_uses_same_helpers_as_engine(self):
         state = new_game("Prev", seed=4)
@@ -70,6 +73,13 @@ class TestMarkets(unittest.TestCase):
         # After A1 the gather is size-capped, so NYC is expensive — not a
         # $900M seizure. Year-1 deposits stay a rounding error vs the pool.
         self.assertLess(nyc["year1_gather"], nyc["pool"] * 0.001)
+
+    def test_second_office_preview_is_not_blocked(self):
+        state = new_game("Home2", seed=4)
+        prev = OPS.preview_branch(state, "caprock")
+        self.assertTrue(prev["already"])
+        self.assertGreater(prev["offices"], 0)
+        self.assertNotEqual(prev["verdict"], "cannot_fund")
         broke = new_game("Broke", seed=4)
         self.assertEqual(OPS.preview_branch(broke, "nyc")["verdict"], "cannot_fund")
 

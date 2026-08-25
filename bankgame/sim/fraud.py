@@ -73,8 +73,16 @@ def step_month(state, rng):
     deposits = L.total_deposits(bank["ledger"]) / 100 / 1_000_000
     from .loans import total_loans
     loans = total_loans(bank["loans"]) / 100 / 1_000_000
-    assets = bank["cached_assets"] / 100 / 1_000_000
+    assets = max(1, bank.get("cached_assets") or 0) / 100 / 1_000_000
     drivers = {"deposits": deposits, "loans": loans, "assets": assets}
+
+    # Prevention spend is a real monthly bill, not a free slider.
+    spend = int(fr.get("prevention_spend") or 0)
+    if spend > 0:
+        from .funding import ensure_cash
+        ensure_cash(state, spend)
+        L.post(bank["ledger"], date, "Fraud prevention program",
+               [["5120", spend, 0], ["1000", 0, spend]], tag="fraud")
 
     total_loss = 0
     for name, ch in CHANNELS.items():
@@ -143,7 +151,8 @@ def _spawn_case(state, rng):
     from .loans import FIRST, LAST
     kind, title, tmpl = rng.choice(CASE_TEMPLATES)
     name = "%s %s" % (rng.choice(FIRST), rng.choice(LAST))
-    scale = max(1.0, (bank["cached_assets"] / 100 / 1_000_000 / 20) ** 0.5)
+    assets = max(1, bank.get("cached_assets") or 0)
+    scale = max(1.0, (assets / 100 / 1_000_000 / 20) ** 0.5)
     amt = int(rng.uniform(40_000, 480_000) * scale) * 100
     case = {"id": fr["next_case_id"], "kind": kind, "name": name, "amount": amt,
             "opened": state["time"]["date"], "status": "open"}

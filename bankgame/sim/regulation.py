@@ -233,9 +233,17 @@ def monthly_update(state, rng):
     reg = state["regulation"]
     events = []
 
+    # BSA/AML spend is a real monthly bill, not a free slider.
+    spend = int(reg["bsa"].get("program_spend") or 0)
+    if spend > 0:
+        from .funding import ensure_cash
+        ensure_cash(state, spend)
+        L.post(bank["ledger"], state["time"]["date"], "BSA/AML program",
+               [["5170", spend, 0], ["1000", 0, spend]], tag="reg")
+
     # BSA/AML: program adequacy vs bank size and activity. In a small bank
     # ops staff double as the BSA function; big banks need dedicated FTEs.
-    assets = bank["cached_assets"]
+    assets = max(1, bank.get("cached_assets") or 0)
     need = max(0.5, (assets / 100 / 1_000_000_000) * 2.5)   # compliance FTE need per $B
     have = bank["ops"]["staff"]["compliance"]["count"] \
         + 0.35 * bank["ops"]["staff"]["ops"]["count"]
@@ -447,3 +455,43 @@ def _write_report(state, comps, composite, r, npa_ratio, lr, wd, rate_risk, cre_
                      "RESTRICTED until ratings improve. Failure to comply will result in "
                      "further action, including receivership.")
     return "\n".join(lines)
+
+
+COMP_OWNER = {
+    "C": "Capital", "A": "Loan book", "M": "Management",
+    "E": "Earnings", "L": "Cash", "S": "Rate risk",
+}
+
+# What number would move each component one grade, in owner language.
+_RECOVERY = {
+    "C": "Raise common (or shrink assets) until CET1 is back above 10%.",
+    "A": "Work the criticized book and stop writing loose CRE / construction.",
+    "M": "Staff compliance, fund the BSA program, and clear the order.",
+    "E": "A quiet year of ~1% ROA. Hiring that loses money will not help.",
+    "L": "Stop the window, pay down wholesale, and get LDR under 1.05.",
+    "S": "Shorten the bond book or hedge. Unrealized losses vs CET1 are the tell.",
+}
+
+
+def exam_recovery_advice(state):
+    """What would move a 3+ composite at the next exam. No mutation."""
+    cam = state["regulation"].get("camels") or {}
+    comps = {k: cam.get(k, 2) for k in "CAMELS"}
+    composite = int(cam.get("composite") or 2)
+    worst = max(comps, key=lambda k: comps[k])
+    floor = comps[worst]
+    actions = []
+    for k, v in comps.items():
+        if v >= 3:
+            actions.append("%s is a %d — %s" % (COMP_OWNER[k], v, _RECOVERY[k]))
+    return {
+        "composite": composite,
+        "components": comps,
+        "floor": worst,
+        "floor_grade": floor,
+        "actions": actions,
+        "needed": (
+            "Composite is max(average, worst−1). The %s %d is the floor; "
+            "fix that or the next exam stays a %d."
+            % (COMP_OWNER[worst], floor, max(composite, floor - 1))),
+    }

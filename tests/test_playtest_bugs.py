@@ -157,10 +157,13 @@ class TestInputHygiene(unittest.TestCase):
 
 
 class TestBranchGuards(unittest.TestCase):
-    def test_cannot_open_second_home_branch(self):
+    def test_second_home_office_is_allowed(self):
+        """I3: a second Caprock office is an extra teller window, not a lock."""
         state = new_game("Dup", seed=77)
-        with self.assertRaises(engine.ActionError):
-            engine.perform_action(state, "open_branch", {"market": "caprock"})
+        engine.perform_action(state, "raise_common", {"amount": 3_000_000_00})
+        engine.perform_action(state, "open_branch", {"market": "caprock"})
+        n = sum(1 for b in state["bank"]["ops"]["branches"] if b.get("open"))
+        self.assertEqual(n, 2)
 
     def test_cannot_close_last_branch(self):
         state = new_game("Last", seed=77)

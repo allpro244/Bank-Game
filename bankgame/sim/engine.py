@@ -232,10 +232,13 @@ def _process_month_boundary(state, prev_date):
         if ev.get("type") == "fdic_auction" and ev.get("franchise"):
             ev["proforma"] = fdic_proforma(state, ev["franchise"], 80)
             pf = ev["proforma"]
+            my_a = max(1, state["bank"].get("cached_assets") or 1)
+            mult = (ev["franchise"].get("deposits") or 0) / my_a
             ev["text"] = (ev.get("text") or "") + (
-                "\n\nYour books after an 80bp bid: CET1 %.1f%%, leverage %.1f%% "
+                "\n\nThis franchise is %.1f× your bank. "
+                "Your books after an 80bp bid: CET1 %.1f%%, leverage %.1f%% "
                 "(%s-capitalized).%s"
-                % (pf["cet1"] * 100, pf["leverage"] * 100, pf["pca"],
+                % (mult, pf["cet1"] * 100, pf["leverage"] * 100, pf["pca"],
                    (" Cannot close: " + "; ".join(pf["blockers"]) + ".")
                    if pf["blockers"] else ""))
         raised.append(push_event(state, ev))
@@ -486,9 +489,15 @@ def _ma_opportunities(state, rng):
 
     already = any(e.get("type") == "bank_for_sale" for e in state["events"]["pending"])
     if (not already) and rng.chance(0.018):
-        # a target for sale, sized relative to you — never a whale
-        t_assets = int(assets * rng.uniform(0.10, 0.35))
-        if t_assets > 8_000_000_00:
+        # Community-era deals stay smaller than you. Once regional, you
+        # can see a larger book — still refused if pro-forma capital breaks.
+        if assets >= 2_000_000_000_00:
+            t_assets = int(assets * rng.uniform(0.25, 1.20))
+        elif assets >= 400_000_000_00:
+            t_assets = int(assets * rng.uniform(0.15, 0.55))
+        else:
+            t_assets = int(assets * rng.uniform(0.10, 0.35))
+        if t_assets >= 2_000_000_00:
             mult = rng.uniform(1.25, 1.85)
             if econ["credit_stress"] > 0.35:
                 mult = rng.uniform(0.6, 1.05)
@@ -509,13 +518,16 @@ def _ma_opportunities(state, rng):
             events.append({
                 "type": "bank_for_sale", "blocking": True,
                 "title": "Acquisition opportunity: %s" % name,
-                "text": ("%s (assets $%sM, based in %s) is quietly for sale. Price: $%s "
+                "text": ("%s (assets $%sM, based in %s) is quietly for sale. "
+                         "That is %.2f× your bank. Price: $%s "
                          "(%.2fx tangible book). Due diligence estimates a %d%% credit mark "
                          "on their loans and typical integration attrition of 5-12%% of "
                          "deposits.\n\nPro-forma after close: CET1 %.1f%%, leverage %.1f%% "
                          "(%s-capitalized).%s"
                          % (name, f"{t_assets // 100 // 1_000_000:,}",
-                            state["regions"][target_mkt]["name"], f"{price // 100:,}",
+                            state["regions"][target_mkt]["name"],
+                            t_assets / max(1, assets),
+                            f"{price // 100:,}",
                             mult, int(deal["credit_mark"] * 100),
                             pf["cet1"] * 100, pf["leverage"] * 100, pf["pca"],
                             (" Cannot close: " + "; ".join(pf["blockers"]) + ".")
@@ -764,6 +776,7 @@ def _integration_month(state, rng):
 def inbox_waiting(state):
     """Decisions that should stop a multi-day advance."""
     fraud.prune_resolved_events(state)
+    loans.apply_credit_box(state)
     if any(e.get("blocking") or e.get("choices") for e in state["events"]["pending"]):
         return True
     if state["bank"]["loans"]["queue"]:
@@ -773,28 +786,74 @@ def inbox_waiting(state):
     return False
 
 
-def advance(state, unit="day", skip_inbox=False):
-    """unit: day | week | month | quarter. Stops early on blocking events
-    and (for week/month/quarter) on inbox items the player has not seen."""
-    n = {"day": 1, "week": 5, "month": 22, "quarter": 66}.get(unit, 1)
-    watch_inbox = (not skip_inbox) and unit in ("week", "month", "quarter")
-    if watch_inbox and inbox_waiting(state):
+def interrupt_reason(state):
+    """Why Play until would stop right now. None if the clock can run."""
+    if state.get("game_over"):
+        return "game_over"
+    fraud.prune_resolved_events(state)
+    loans.apply_credit_box(state)
+    if state["regulation"].get("seized"):
+        return "seized"
+    if state["crisis"].get("run_active"):
+        return "run"
+    if any(e.get("blocking") for e in state["events"]["pending"]):
+        return "blocking"
+    if state["bank"]["loans"]["queue"]:
+        return "credit"
+    if any(c.get("status") == "open" for c in state["bank"]["fraud"]["cases"]):
+        return "fraud"
+    if state["regulation"]["pca"] not in ("well", "adequate"):
+        return "pca"
+    if state["regulation"]["camels"]["composite"] >= 4:
+        return "camels"
+    return None
+
+
+def advance(state, unit="day", skip_inbox=False, max_days=None):
+    """unit: day | week | month | quarter | until.
+
+    `until` is Play until: run day-by-day until an interrupt (or max_days).
+    The credit box (if enabled) handles matching memos so they do not stop
+    the clock. Advisor never writes the box.
+    """
+    if unit == "until":
+        n = int(max_days or 1260)
+        watch_inbox = True
+        skip_inbox = False
+    else:
+        n = {"day": 1, "week": 5, "month": 22, "quarter": 66}.get(unit, 1)
+        watch_inbox = (not skip_inbox) and unit in ("week", "month", "quarter")
+    if unit == "until":
+        reason = interrupt_reason(state)
+        if reason:
+            return {"days": 0, "events": [], "date": state["time"]["date"],
+                    "inbox": True, "stopped": reason}
+    elif watch_inbox and inbox_waiting(state):
         return {"days": 0, "events": [], "date": state["time"]["date"],
                 "inbox": True}
     all_events = []
     ran = 0
+    stopped = None
     for _ in range(n):
         if state["game_over"]:
+            stopped = "game_over"
             break
         evs = step_day(state)
         all_events.extend(evs)
         ran += 1
         if any(e.get("blocking") for e in evs):
+            stopped = "blocking"
             break
-        if watch_inbox and inbox_waiting(state):
+        if unit == "until":
+            reason = interrupt_reason(state)
+            if reason:
+                stopped = reason
+                break
+        elif watch_inbox and inbox_waiting(state):
             break
     return {"days": ran, "events": all_events, "date": state["time"]["date"],
-            "inbox": watch_inbox and inbox_waiting(state)}
+            "inbox": watch_inbox and inbox_waiting(state),
+            "stopped": stopped}
 
 
 # ---------------------------------------------------------------- actions
@@ -917,6 +976,12 @@ def perform_action(state, action, payload):
         if isinstance(res, str):
             raise ActionError(res)
         return {"message": "Repaid."}
+
+    if action == "preview_raise_common":
+        res = funding.preview_raise_common(state, int(_num("amount", 1)))
+        if isinstance(res, str):
+            raise ActionError(res)
+        return res
 
     if action == "raise_common":
         res = funding.raise_common(state, int(_num("amount", 1)))
@@ -1186,6 +1251,9 @@ POLICY_SPECS = [
     ("loans.limits.", list(loans.PRODUCTS), int, 0, 100),
     ("loans.approval_threshold", None, int, 100_000_00, 100_000_000_00),
     ("loans.auto_policy", None, ("queue", "approve_ab", "decline"), None, None),
+    ("loans.credit_box.enabled", None, (True, False), None, None),
+    ("loans.credit_box.max_hold", None, int, 100_000_00, 50_000_000_00),
+    ("loans.credit_box.participate_over", None, (True, False), None, None),
     ("loans.mortgage_sale_frac", None, float, 0.0, 0.9),
     ("ops.salary_multiplier", None, float, 0.7, 2.0),
     ("ops.auto_backfill", None, (True, False), None, None),
@@ -1234,6 +1302,8 @@ def set_policy(state, path, value):
             if value < lo or value > hi:
                 raise ActionError("value out of range [%s, %s]" % (lo, hi))
         # apply
+        if path.startswith("loans.credit_box."):
+            loans.credit_box(state)
         parts = path.split(".")
         target = state["bank"] if parts[0] != "regulation" else state
         node = target
