@@ -188,6 +188,17 @@ class TestWebAssets(unittest.TestCase):
         for name in ("app.js", "charts.js"):
             self.assertIn(name, html, "index.html no longer loads %s" % name)
 
+    def test_topbar_has_fed_funds(self):
+        """The policy rate has to live in the sticky bar, not only on Markets."""
+        with open(os.path.join(WEB, "index.html"), encoding="utf-8") as fh:
+            html = fh.read()
+        self.assertIn('id="tb-ff"', html)
+        self.assertIn("Fed funds", html)
+        with open(os.path.join(WEB, "app.js"), encoding="utf-8") as fh:
+            js = fh.read()
+        self.assertIn("tb-ff", js)
+        self.assertIn("fed_funds", js)
+
 
 if __name__ == "__main__":
     unittest.main()
