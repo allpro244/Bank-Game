@@ -1,5 +1,8 @@
 # Playtest: "get as big as possible" / biggest bank in the world
 
+Report only — the next working plan that consumes this (and the parallel
+Grok session) is `PLAYTEST_PLAN.md`.
+
 A play-to-win session on the merged branch. Goal set to **world** (beat every
 living rival, then pass $250B). Played legitimately — no use of the uncapped
 capital-raise exploit from `PLAYTEST_BUGS.md`.

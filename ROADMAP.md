@@ -9,6 +9,10 @@ expansion). Evidence numbers below are from those runs, not guesses.
 what order, and what “done” means. When a phase ships, check it off here
 and note the PR.
 
+Phases A–G are in. The next working plan is **Phase I** —
+`PLAYTEST_PLAN.md` — from the two world-goal playtests. Phase H stays
+parked until I is done.
+
 ---
 
 ## Thesis
@@ -600,10 +604,36 @@ Keep the West Texas $20M start. Consider:
 
 ---
 
-## Phase H — Later depth (only after A–E)
+## Phase I — Playtest pass (next)
+
+A–G shipped. Two independent play-to-win sessions of the default
+**world** goal (Grok + Claude, `PLAYTEST_TYCOON.md`) both failed to
+reach $250B and found the same spine: the clock is unplayable, the
+industry goes extinct, growth economics punish staffing and metro
+entry, and a few systems still lie or crash.
+
+**Working plan:** `PLAYTEST_PLAN.md`. Do not start H to avoid
+finishing I.
+
+| Item | One line |
+| --- | --- |
+| I6 | Post BSA/fraud spend; guard `fraud.py` sqrt of negative assets |
+| I4 | Capital-raise preview; overnight **auto** must not rack the window |
+| I5 | Run banner on Deposits/Desk; visible CAMELS-4 recovery path |
+| I2 | Living rivals, new charters, rival–rival M&A, weight-class deals |
+| I3 | Opex band, lender earns their keep, trade-area metros, 2nd office, LDR, digital preview, year-one sit-still |
+| I1 | Play until + player-written credit box (clock, not advisor autopilot) |
+| I7 | Advisor cards carry the same NI preview as the button |
+
+Ship order and tests are in `PLAYTEST_PLAN.md`. The $250B number
+does not move until I2+I3 are measured.
+
+---
+
+## Phase H — Later depth (only after A–E and I)
 
 These are the DESIGN.md “next depth pass” items, rewritten
-as project work. Do not start H to avoid finishing A.
+as project work. Do not start H to avoid finishing A or I.
 
 | Item | Why it waits | Sketch |
 | --- | --- | --- |
@@ -708,7 +738,7 @@ paste the summary in the PR.
 - Making charter, Durbin, or G-SIB the tutorial.
 
 If a new idea is not on this list, it goes under H or it
-loses to an open A/B item.
+loses to an open I item (`PLAYTEST_PLAN.md`).
 
 ---
 
@@ -724,6 +754,11 @@ loses to an open A/B item.
 | Verhalen branch | +~$5M deposits in a year, still well-capitalized. This is the intended growth. |
 | Year-1 events (one seed) | 3 loan apps (tutorial said “most months”), 0 exams yet, 2 window news items. |
 
+Later play-to-win sessions of the default world goal (Grok: $1.2B /
+26y then seizure; Claude: $81.2B / 143y then seizure; neither hit
+$250B) are in `PLAYTEST_TYCOON.md` and `PLAYTEST_PLAN.md`. They are
+why Phase I exists.
+
 ---
 
 ## Status
@@ -736,4 +771,5 @@ loses to an open A/B item.
 - [x] Phase E (E1 memo is a decision; E2 counter + participate; E3 relationship memory; E4 mortgage-sale card and preview)
 - [x] Phase F (F1 news filter to served markets + one national wire; F2 rarer/meaner fraud; F3 sandbox vs historical copy and path; F4 Markets share ceiling)
 - [x] Phase G (G1 opex/PD knobs; G2 no year-ROA until 6 months; G3 L 3–4 only after window/wholesale/hot LDR; G4 opening LDR ~0.75 and cash for one rural branch)
-- [ ] Phase H (optional)
+- [ ] Phase I (playtest pass — `PLAYTEST_PLAN.md`)
+- [ ] Phase H (optional; after I)
