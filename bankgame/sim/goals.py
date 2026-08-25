@@ -164,14 +164,14 @@ def _progress_bits(state, gid, years):
             bits = ("You are #%d of %d. Next to pass: %s at %s. %s still leads the map."
                     % (race["rank"], race["field"], nxt, _fm_assets(nxt_a),
                        race["rival_name"]))
-        if race["beats_rivals"]:
-            size = 0.55
-        else:
-            nxt_a = race.get("next_assets") or race["rival_assets"]
-            size = 0.85 * min(1.0, race["me"] / max(1, nxt_a))
-        crown = (0.45 if race["beats_rivals"] else 0.15) * min(
-            1.0, race["me"] / max(1, WORLD_CROWN))
-        return bits, size + crown
+        # The bar is the two gates the goal actually requires: pass the
+        # living leader, then sit on the $250B table. Next-smallest rival
+        # is a waypoint in the sentence, not 85% of the meter — a $20M
+        # charter must not read as "28% of the way to the world."
+        to_lead = 1.0 if race["beats_rivals"] else min(
+            1.0, race["me"] / max(1, race["rival_assets"]))
+        to_crown = min(1.0, race["me"] / max(1, WORLD_CROWN))
+        return bits, 0.40 * to_lead + 0.60 * to_crown
 
     if gid == "independent":
         return ("Year %.1f of 20. Still independent."

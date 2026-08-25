@@ -229,6 +229,15 @@ def _process_month_boundary(state, prev_date):
             raised.append(push_event(state, ev))
             national_used = True
     for ev in competitors.step_month(state, _rng(state, "comp")):
+        if ev.get("type") == "fdic_auction" and ev.get("franchise"):
+            ev["proforma"] = fdic_proforma(state, ev["franchise"], 80)
+            pf = ev["proforma"]
+            ev["text"] = (ev.get("text") or "") + (
+                "\n\nYour books after an 80bp bid: CET1 %.1f%%, leverage %.1f%% "
+                "(%s-capitalized).%s"
+                % (pf["cet1"] * 100, pf["leverage"] * 100, pf["pca"],
+                   (" Cannot close: " + "; ".join(pf["blockers"]) + ".")
+                   if pf["blockers"] else ""))
         raised.append(push_event(state, ev))
 
     for ev in deposits.step_month(state, _rng(state, "deposit")):
@@ -535,6 +544,43 @@ def _ma_opportunities(state, rng):
     return events
 
 
+def fdic_proforma(state, franchise, premium_bp=80):
+    """Capital impact of winning an FDIC auction, without mutating state."""
+    from .regulation import capital_ratios, pca_category
+    r = capital_ratios(state)
+    deposits_assumed = int(franchise.get("deposits") or 0)
+    loans_gross = int(franchise.get("loans") or 0)
+    mark = float(franchise.get("credit_mark") or 0.0)
+    loans_net = min(int(loans_gross * (1 - mark)), deposits_assumed)
+    premium = int(deposits_assumed * max(0, int(premium_bp)) / 10000)
+    provision = int(loans_net * 0.02)
+    new_assets = r["assets"] + deposits_assumed
+    new_te = r["cet1"] - provision - premium
+    lev = new_te / max(1, new_assets)
+    new_rwa = r["rwa"] + loans_net
+    cet1 = new_te / max(1, new_rwa)
+    fake = dict(r)
+    fake.update({"cet1_ratio": cet1, "leverage_ratio": lev,
+                 "tang_equity_ratio": lev, "cet1": new_te,
+                 "tier1_ratio": cet1, "total_ratio": cet1})
+    pca = pca_category(fake)
+    blockers = []
+    if deposits_assumed > r["assets"] * 2:
+        blockers.append(
+            "the franchise is more than twice your bank — you would be the "
+            "acquired, not the acquirer")
+    if pca not in ("well", "adequate"):
+        blockers.append("pro-forma capital would be %s-capitalized" % pca)
+    if lev < 0.05:
+        blockers.append("pro-forma leverage would be %.1f%%" % (lev * 100))
+    return {
+        "new_assets": new_assets, "new_te": new_te,
+        "leverage": round(lev, 5), "cet1": round(cet1, 5),
+        "pca": pca, "premium": premium, "deposits": deposits_assumed,
+        "can_bid": not blockers, "blockers": blockers,
+    }
+
+
 def _resolve_fdic_bid(state, ev, premium_bp):
     """FDIC-assisted acquisition of a failed rival."""
     bank = state["bank"]
@@ -544,6 +590,9 @@ def _resolve_fdic_bid(state, ev, premium_bp):
         return "The FDIC will not accept bids from banks in your condition."
     if reg["bsa"]["fined"]:
         return "Your BSA consent order disqualifies you from assisted transactions."
+    pf = fdic_proforma(state, fr, premium_bp)
+    if not pf["can_bid"]:
+        return "The FDIC will not award you this franchise: " + "; ".join(pf["blockers"]) + "."
     if premium_bp <= fr["rival_bid_bp"]:
         return {"lost": True,
                 "message": "You bid %dbp; a rival bid %dbp and won the franchise."
